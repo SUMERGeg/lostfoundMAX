@@ -3,12 +3,15 @@ import { Bot } from '@maxhub/max-bot-api'
 import pool from './db.js'
 import {
   buildMainMenuKeyboard,
+  buildFlowPayload,
   handleMessage as handleFlowMessage,
   handleCallback as handleFlowCallback
 } from './fsm.js'
 
 const MAX_API_BASE = process.env.MAX_API_BASE
 const MAX_BOT_TOKEN = process.env.MAX_BOT_TOKEN
+const FRONT_ORIGIN = (process.env.FRONT_ORIGIN || 'http://localhost:5173').trim()
+const IS_FRONT_LINK_ALLOWED = FRONT_ORIGIN.startsWith('https://')
 
 let botInstance = null
 
@@ -29,7 +32,7 @@ function ensureBot() {
     console.error('[MAX] Необработанная ошибка в боте:', error)
     if (ctx?.update) {
       console.error('[MAX] Контекст события:', JSON.stringify(ctx.update, null, 2))
-    }
+      }
   })
 
   void bot.api.setMyCommands([
@@ -43,7 +46,7 @@ function ensureBot() {
     }
   ]).catch(err => {
     console.error('[MAX] Не удалось установить список команд:', err)
-  })
+    })
 
   bot.on('bot_started', async ctx => {
     await ctx.reply(
@@ -52,12 +55,20 @@ function ensureBot() {
         attachments: [buildMainMenuKeyboard()]
       }
     )
+
+    if (!IS_FRONT_LINK_ALLOWED && FRONT_ORIGIN) {
+      await ctx.reply(`Мини-приложение: ${FRONT_ORIGIN}`)
+    }
   })
 
   bot.command('start', async ctx => {
     await ctx.reply('Готово! Выберите действие из меню:', {
       attachments: [buildMainMenuKeyboard()]
     })
+
+    if (!IS_FRONT_LINK_ALLOWED && FRONT_ORIGIN) {
+      await ctx.reply(`Мини-приложение: ${FRONT_ORIGIN}`)
+    }
   })
 
   bot.command('stats', async ctx => {
@@ -97,8 +108,8 @@ export function getBot() {
 export async function startBot() {
   const bot = ensureBot()
   if (!bot) {
-    return
-  }
+        return
+      }
 
   try {
     await bot.start()
@@ -122,8 +133,7 @@ export async function sendMessage(userId, text, extra = {}) {
   const bot = ensureBot()
   if (!bot) {
     throw new Error('MAX Bot не настроен')
-  }
+      }
 
   return bot.api.sendMessageToUser(userId, text, extra)
 }
-

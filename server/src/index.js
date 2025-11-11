@@ -34,7 +34,7 @@ startMatchingScheduler()
 app.listen(port, () => {
   console.log(`[server] Lost&Found API запущен на http://localhost:${port}`)
   console.log(`[server] CORS разрешён для: ${frontOrigin}`)
-
+  
   if (process.env.MAX_BOT_TOKEN) {
     console.log('[server] MAX Bot токен настроен ✓')
     startBot().catch(err => {

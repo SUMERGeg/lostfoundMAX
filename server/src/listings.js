@@ -36,7 +36,18 @@ listings.get('/:id', async (req, res) => {
 });
 
 listings.post('/', async (req, res) => {
-  const { authorId, type, category, title, description='', lat=null, lng=null, occurredAt=null, photos=[] } = req.body;
+  const {
+    authorId,
+    type,
+    category,
+    title,
+    description = '',
+    lat = null,
+    lng = null,
+    occurredAt = null,
+    photos = [],
+    secrets = []
+  } = req.body;
   if (!authorId || !type || !category || !title) return res.status(400).json({error:'bad payload'});
   const id = crypto.randomUUID();
 
@@ -48,6 +59,14 @@ listings.post('/', async (req, res) => {
   for (const url of photos) {
     await pool.query('INSERT INTO photos (id, listing_id, url) VALUES (?,?,?)',
       [crypto.randomUUID(), id, url]);
+  }
+
+  for (const secret of Array.isArray(secrets) ? secrets : []) {
+    if (!secret) continue;
+    await pool.query(
+      'INSERT INTO secrets (id, listing_id, cipher) VALUES (?,?,?)',
+      [crypto.randomUUID(), id, JSON.stringify(secret)]
+    );
   }
   res.json({ id });
 });

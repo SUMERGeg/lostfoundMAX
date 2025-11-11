@@ -1,10 +1,14 @@
+import crypto from 'node:crypto'
 import { Keyboard } from '@maxhub/max-bot-api'
 import pool from './db.js'
 import { ensureUser } from './users.js'
+import { encryptSecrets } from './security.js'
+import { score as computeMatchScore } from './matching.js'
 
 const { inlineKeyboard, button } = Keyboard
 
-const FRONT_URL = process.env.FRONT_ORIGIN || 'http://localhost:5173'
+const FRONT_URL = (process.env.FRONT_ORIGIN || 'http://localhost:5173').trim()
+const IS_FRONT_LINK_ALLOWED = FRONT_URL.startsWith('https://')
 
 export const FLOWS = {
   LOST: 'lost',
@@ -67,6 +71,183 @@ const CATEGORY_OPTIONS = [
   { id: 'wallet', title: 'Ценности', emoji: '💍' }
 ]
 
+const CATEGORY_FIELD_SETS = {
+  pet: [
+    {
+      key: 'species',
+      label: 'Вид',
+      question: {
+        lost: 'Какое животное потерялось? (вид)',
+        found: 'Какое животное нашли? (вид)'
+      },
+      hint: 'Например: кошка, собака, хорёк.',
+      required: true
+    },
+    {
+      key: 'breed',
+      label: 'Порода',
+      question: 'Какая порода? Если не знаете — напишите «не знаю» или /skip.',
+      required: false
+    },
+    {
+      key: 'color',
+      label: 'Окрас / приметы',
+      question: 'Опишите окрас или особые приметы. Можно несколько слов.',
+      required: true
+    },
+    {
+      key: 'size',
+      label: 'Размер',
+      question: 'Размер животного (крупный, средний, маленький).',
+      required: false
+    },
+    {
+      key: 'nickname',
+      label: 'Кличка / опознавательные знаки',
+      question: {
+        lost: 'Какая кличка у питомца? (если есть)',
+        found: 'Есть ли ошейник, жетон или другая опознавательная метка?'
+      },
+      required: false
+    }
+  ],
+  phone: [
+    {
+      key: 'device',
+      label: 'Устройство',
+      question: {
+        lost: 'Что за устройство потерялось? (тип, модель)',
+        found: 'Что за устройство нашли? (тип, модель)'
+      },
+      hint: 'Например: смартфон iPhone 13, планшет Samsung Tab S7.',
+      required: true
+    },
+    {
+      key: 'color',
+      label: 'Цвет',
+      question: 'Какой цвет корпуса/чехла?',
+      required: true
+    },
+    {
+      key: 'condition',
+      label: 'Особенности',
+      question: 'Есть ли особенности: трещины, наклейки, чехол?',
+      required: false
+    },
+    {
+      key: 'serial_hint',
+      label: 'Уникальная метка',
+      question: {
+        lost: 'Укажите уникальную метку (последние цифры IMEI или защитный знак). Это сохранится в секрете.',
+        found: 'Опишите, какие уникальные метки заметили (не раскрывая полностью).'
+      },
+      hint: 'Например: IMEI заканчивается на 4821, наклейка внизу.',
+      required: false,
+      store: 'secret_hint'
+    }
+  ],
+  bag: [
+    {
+      key: 'type',
+      label: 'Тип предмета',
+      question: 'Что именно потеряно/найдено? (рюкзак, сумка, портфель и т.п.)',
+      required: true
+    },
+    {
+      key: 'brand',
+      label: 'Бренд',
+      question: 'Если есть бренд/марка — напишите.',
+      required: false
+    },
+    {
+      key: 'color',
+      label: 'Цвет / материал',
+      question: 'Цвет и материал? (например, чёрная кожа)',
+      required: true
+    },
+    {
+      key: 'features',
+      label: 'Отличительные приметы',
+      question: 'Есть ли отличительные приметы: нашивки, брелоки, содержимое?',
+      required: false
+    }
+  ],
+  document: [
+    {
+      key: 'doc_type',
+      label: 'Тип документа',
+      question: 'Какой документ? (паспорт, ВУ, студенческий и т.д.)',
+      required: true
+    },
+    {
+      key: 'name_hint',
+      label: 'Фамилия/инициалы',
+      question: {
+        lost: 'Укажите инициалы или фамилию (без полного номера).',
+        found: 'Укажите, на какую фамилию оформлен документ (если видно).'
+      },
+      required: true
+    },
+    {
+      key: 'extra',
+      label: 'Дополнительные данные',
+      question: {
+        lost: 'Есть ли дополнительные идентификаторы (орган выдачи, дата)?',
+        found: 'Какие ещё данные видны? Номера полностью не публикуем.'
+      },
+      required: false
+    }
+  ],
+  keys: [
+    {
+      key: 'key_type',
+      label: 'Тип ключей',
+      question: 'Какие ключи? (квартира, авто, домофон, сейф...)',
+      required: true
+    },
+    {
+      key: 'bundle',
+      label: 'Связка / аксессуары',
+      question: 'Есть ли связка, брелок, чехол? Опишите.',
+      required: false
+    },
+    {
+      key: 'unique',
+      label: 'Уникальные признаки',
+      question: {
+        lost: 'Опишите отличительные зубья/метки (если можно рассказать безопасно).',
+        found: 'Опишите отличительные признаки (без возможности изготовить копию).'
+      },
+      required: false
+    }
+  ],
+  wallet: [
+    {
+      key: 'item',
+      label: 'Предмет',
+      question: 'Что за ценность? (кошелёк, украшение, техника и т.д.)',
+      required: true
+    },
+    {
+      key: 'looks',
+      label: 'Внешний вид',
+      question: 'Как выглядит предмет? Цвет, материал, форма.',
+      required: true
+    },
+    {
+      key: 'value_hint',
+      label: 'Уникальные детали',
+      question: {
+        lost: 'Какие уникальные детали есть? (внутри записка, гравировка — можно упомянуть частично)',
+        found: 'Опишите без раскрытия полной информации: гравировка, чья инициалы?'
+      },
+      required: false
+    }
+  ]
+}
+
+const ATTRIBUTE_STEP_LABEL = 'Шаг 2/6 — описание'
+
 const FLOW_KEYWORDS = {
   [FLOWS.LOST]: ['потерял', 'потеряла', 'потеряли', '/lost'],
   [FLOWS.FOUND]: ['нашёл', 'нашел', 'нашла', 'нашли', '/found']
@@ -115,21 +296,28 @@ const StepHandlers = {
 }
 
 export function buildMainMenuKeyboard() {
-  return inlineKeyboard([
+  const rows = [
     [
       button.callback('🆘 Потерял', buildFlowPayload(FLOWS.LOST, 'start')),
       button.callback('📦 Нашёл', buildFlowPayload(FLOWS.FOUND, 'start'))
     ],
-    [
-      button.link('🗺️ Открыть карту', FRONT_URL)
-    ]
-  ])
+  ]
+
+  if (IS_FRONT_LINK_ALLOWED) {
+    rows.push([button.link('🗺️ Открыть карту', FRONT_URL)])
+  }
+
+  return inlineKeyboard(rows)
 }
 
 export async function sendMainMenu(ctx, intro = 'Выберите действие:') {
   await ctx.reply(intro, {
     attachments: [buildMainMenuKeyboard()]
   })
+
+  if (!IS_FRONT_LINK_ALLOWED && FRONT_URL) {
+    await ctx.reply(`Мини-приложение: ${FRONT_URL}`)
+  }
 }
 
 export async function handleMessage(ctx) {
@@ -290,8 +478,13 @@ function createCategoryHandler(flow) {
         return
       }
 
-      const nextPayload = withListing(runtime, listing => {
+      const nextPayload = withListing(runtime, (listing, payload) => {
         listing.category = option.id
+        listing.details = ''
+        listing.attributes = {}
+        listing.pendingSecrets = []
+        payload.meta = payload.meta ?? {}
+        delete payload.meta.currentAttributeKey
       })
 
       await safeAnswerOnCallback(ctx, { notification: `${option.emoji} ${option.title}` })
@@ -304,34 +497,181 @@ function createAttributesHandler(flow) {
   const config = FLOW_COPY[flow]
 
   return {
-    enter: async ctx => {
-      await ctx.reply(
-        `${config.emoji} Шаг 2/6 — описание\n\n${config.attributesPrompt}`
-      )
-    },
-    onMessage: async (ctx, runtime, message) => {
-      if (!message.text || message.text.length < 5) {
-        await ctx.reply('Нужно чуть подробнее. Добавьте хотя бы пару слов об особенностях.')
+    enter: async (ctx, runtime) => {
+      const listing = runtime.payload?.listing
+      const category = listing?.category
+
+      if (!category) {
+        await ctx.reply('Сначала выберите категорию.')
+        await transitionToStep(ctx, runtime.user, FLOW_STEP_MAP[flow].CATEGORY, runtime.payload)
         return
       }
 
-      const nextPayload = withListing(runtime, listing => {
-        listing.details = message.text
+      const currentKey = runtime.payload?.meta?.currentAttributeKey
+      const field = getAttributeField(flow, category, currentKey)
+
+      if (!field) {
+        await transitionToStep(ctx, runtime.user, FLOW_STEP_MAP[flow].PHOTO, runtime.payload, { skipIntro: true })
+        return
+      }
+
+      const isFirstQuestion = !listing?.attributes || Object.keys(listing.attributes).length === 0
+
+      const lines = []
+      if (isFirstQuestion) {
+        lines.push(`${config.emoji} ${ATTRIBUTE_STEP_LABEL}`, '', config.attributesPrompt, '')
+      }
+
+      lines.push(formatAttributeQuestion(field, flow))
+      const hint = formatAttributeHint(field, flow)
+      if (hint) {
+        lines.push(hint)
+      }
+
+      if (!field.required) {
+        lines.push('', 'Можно пропустить командой /skip.')
+      }
+
+      await ctx.reply(lines.join('\n'))
+    },
+    onMessage: async (ctx, runtime, message) => {
+      const listing = runtime.payload?.listing
+      const category = listing?.category
+
+      if (!category) {
+        await ctx.reply('Сначала выберите категорию.')
+        await transitionToStep(ctx, runtime.user, FLOW_STEP_MAP[flow].CATEGORY, runtime.payload)
+        return
+      }
+
+      const currentKey = runtime.payload?.meta?.currentAttributeKey
+      if (!currentKey) {
+        await transitionToStep(ctx, runtime.user, FLOW_STEP_MAP[flow].ATTRIBUTES, runtime.payload, { skipIntro: true })
+        return
+      }
+
+      const field = getAttributeField(flow, category, currentKey)
+      if (!field) {
+        await transitionToStep(ctx, runtime.user, FLOW_STEP_MAP[flow].ATTRIBUTES, runtime.payload, { skipIntro: true })
+        return
+      }
+
+      const text = message.text?.trim?.() ?? ''
+      const isSkip = message.lower === '/skip'
+
+      if (!isSkip && field.required && text.length < 2) {
+        await ctx.reply('Нужно добавить чуть больше деталей. Если не хотите отвечать — отправьте /skip.')
+        return
+      }
+
+      if (!isSkip && !text) {
+        if (field.required) {
+          await ctx.reply('Ответ не распознан. Напишите текст или используйте /skip.')
+        } else {
+          await ctx.reply('Если нет данных — отправьте /skip.')
+        }
+        return
+      }
+
+      const value = isSkip ? null : text
+
+      const nextPayload = withListing(runtime, (listing, payload) => {
+        listing.attributes = listing.attributes ?? {}
+        listing.attributes[currentKey] = value
+
+        if (field.store === 'secret_hint') {
+          listing.pendingSecrets = listing.pendingSecrets ?? []
+          listing.pendingSecrets = listing.pendingSecrets.filter(item => item.key !== currentKey)
+          if (value && listing.pendingSecrets.length < 3) {
+            listing.pendingSecrets.push({ key: currentKey, value })
+          }
+        }
+
+        payload.meta = payload.meta ?? {}
+        delete payload.meta.currentAttributeKey
       })
 
-      await transitionToStep(ctx, runtime.user, FLOW_STEP_MAP[flow].PHOTO, nextPayload)
+      await transitionToStep(ctx, runtime.user, FLOW_STEP_MAP[flow].ATTRIBUTES, nextPayload, { skipIntro: true })
     }
   }
 }
 
 function createPhotoHandler(flow) {
+  const photoLimit = 3
+  const isFound = flow === FLOWS.FOUND
+
   return {
     enter: async (ctx, runtime) => {
-      await ctx.reply('📸 Шаг с загрузкой фото ещё в разработке, поэтому мы сразу перейдём далее.')
-      await transitionToStep(ctx, runtime.user, FLOW_STEP_MAP[flow].LOCATION, runtime.payload, { skipIntro: true })
+      const currentCount = runtime.payload?.listing?.photos?.length ?? 0
+
+      const lines = [
+        '📸 Шаг 3/6 — фото',
+        isFound
+          ? 'Прикрепите до 3 нейтральных фото найденного предмета (без серийников и уникальных меток).'
+          : 'Прикрепите до 3 фото, которые помогут опознать предмет.',
+        'Можно отправлять по одному снимку в нескольких сообщениях.',
+        'Если хотите пропустить — отправьте /skip.'
+      ]
+
+      if (currentCount > 0) {
+        lines.push('', `Уже загружено: ${currentCount}/${photoLimit}. Добавьте ещё или напишите /next, чтобы продолжить.`)
+      }
+
+      await ctx.reply(lines.join('\n'))
     },
-    onMessage: async () => {
-      // до внедрения загрузки фото ничего не делаем
+    onMessage: async (ctx, runtime, message) => {
+      const listing = runtime.payload?.listing ?? {}
+      const lower = message.lower ?? ''
+      const photos = listing.photos ?? []
+
+      if (['/skip'].includes(lower)) {
+        await ctx.reply('Хорошо, пропускаем шаг с фото.')
+        await transitionToStep(ctx, runtime.user, FLOW_STEP_MAP[flow].LOCATION, runtime.payload, { skipIntro: true })
+        return
+      }
+
+      if (['/next', 'готово', 'готов', 'dalee', 'далее'].includes(lower)) {
+        if ((photos?.length ?? 0) === 0) {
+          await ctx.reply('Пока нет ни одного фото. Прикрепите хотя бы одно или отправьте /skip.')
+          return
+        }
+
+        await ctx.reply('Фото сохранены. Переходим к следующему шагу.')
+        await transitionToStep(ctx, runtime.user, FLOW_STEP_MAP[flow].LOCATION, runtime.payload, { skipIntro: true })
+        return
+      }
+
+      const attachments = extractPhotoAttachments(ctx.message)
+
+      if (attachments.length === 0) {
+        await ctx.reply('Не вижу фото. Прикрепите изображение или отправьте /skip.')
+        return
+      }
+
+      let appendMeta = { added: 0, skipped: 0 }
+      const nextPayload = withListing(runtime, listing => {
+        listing.photos = listing.photos ?? []
+        appendMeta = appendPhotoAttachments(listing, attachments, photoLimit)
+      })
+
+      const newCount = nextPayload.listing.photos.length
+
+      if (appendMeta.added === 0) {
+        await ctx.reply('Лимит достигнут или фото уже добавлены. Если всё готово, отправьте /next или /skip.')
+        return
+      }
+
+      if (newCount >= photoLimit) {
+        await ctx.reply(`Отлично! Достигли лимита ${photoLimit} фото. Переходим к локации.`)
+        await transitionToStep(ctx, runtime.user, FLOW_STEP_MAP[flow].LOCATION, nextPayload, { skipIntro: true })
+      } else {
+        await saveStateRecord(runtime.user.userId, FLOW_STEP_MAP[flow].PHOTO, nextPayload)
+        const extra =
+          appendMeta.skipped > 0
+            ? ` Некоторые фото не сохранились: достигнут лимит ${photoLimit}.`
+            : ''
+        await ctx.reply(`Фото сохранены: ${newCount}/${photoLimit}. Можно добавить ещё или написать /next.${extra}`)
+      }
     }
   }
 }
@@ -346,18 +686,40 @@ function createLocationHandler(flow) {
       )
     },
     onMessage: async (ctx, runtime, message) => {
-      if (!message.text && !message.location) {
+      const note = message.text?.trim?.() ?? ''
+      const point =
+        message.location ??
+        extractLocationAttachment(ctx.message)
+      const lower = message.lower ?? ''
+
+      if (lower === '/skip') {
+        const nextPayload = withListing(runtime, listing => {
+          if (note) {
+            listing.locationNote = note
+          }
+        })
+        await ctx.reply('Хорошо, пропускаем указание места. Вы всегда можете уточнить позже.')
+        await transitionToStep(ctx, runtime.user, FLOW_STEP_MAP[flow].SECRETS, nextPayload, { skipIntro: true })
+        return
+      }
+
+      if (!note && !point) {
         await ctx.reply('Укажите место текстом или пришлите геопозицию.')
         return
       }
 
       const nextPayload = withListing(runtime, listing => {
-        listing.locationNote = message.text ?? listing.locationNote ?? ''
-        if (message.location) {
-          listing.location = {
-            latitude: message.location.latitude,
-            longitude: message.location.longitude,
-            precision: 'point'
+        if (note) {
+          listing.locationNote = note
+        }
+
+        if (point) {
+          const { public: generalized, original } = generalizeLocation(flow, point)
+          if (generalized) {
+            listing.location = generalized
+          }
+          if (original) {
+            listing.locationOriginal = original
           }
         }
       })
@@ -371,10 +733,26 @@ function createSecretsHandler(flow) {
   const config = FLOW_COPY[flow]
 
   return {
-    enter: async ctx => {
-      await ctx.reply(
-        `${config.emoji} Шаг 5/6 — ${config.secretsLabel.toLowerCase()}\n\n${config.secretsPrompt}`
-      )
+    enter: async (ctx, runtime) => {
+      const listing = runtime.payload?.listing ?? {}
+      const hints = listing.pendingSecrets ?? []
+
+      const lines = [
+        `${config.emoji} Шаг 5/6 — ${config.secretsLabel.toLowerCase()}`,
+        '',
+        config.secretsPrompt
+      ]
+
+      if (hints.length > 0) {
+        lines.push('', 'Подсказки (из предыдущих шагов):')
+        hints.slice(0, 3).forEach(item => {
+          lines.push(` - ${item.value}`)
+        })
+      }
+
+      lines.push('', 'Отправьте каждый секрет отдельной строкой. Чтобы пропустить — /skip.')
+
+      await ctx.reply(lines.join('\n'))
     },
     onMessage: async (ctx, runtime, message) => {
       const lower = message.lower
@@ -383,8 +761,17 @@ function createSecretsHandler(flow) {
         ? []
         : splitSecrets(message.text || '').slice(0, 3)
 
+      let encryptedSecrets = []
+      try {
+        encryptedSecrets = encryptSecrets(secrets)
+      } catch (error) {
+        console.error('[FSM] Ошибка шифрования секретов:', error)
+      }
+
       const nextPayload = withListing(runtime, listing => {
         listing.secrets = secrets
+        listing.encryptedSecrets = encryptedSecrets
+        listing.pendingSecrets = []
       })
 
       await transitionToStep(ctx, runtime.user, FLOW_STEP_MAP[flow].CONFIRM, nextPayload)
@@ -401,9 +788,14 @@ function createConfirmHandler(flow) {
       const categoryLabel = describeCategory(listing.category)
       const secretsLabel = config.secretsLabel
 
+      const attributeLines = buildAttributeLines(flow, listing)
+
       const summaryLines = [
         `Категория: ${categoryLabel}`,
-        `Описание: ${listing.details || '—'}`,
+        attributeLines.length
+          ? 'Характеристики:\n - ' + attributeLines.join('\n - ')
+          : 'Характеристики: —',
+        `Фото: ${listing.photos?.length ?? 0} шт`,
         listing.location
           ? `Координаты: ${listing.location.latitude?.toFixed?.(5) ?? '?'}°, ${listing.location.longitude?.toFixed?.(5) ?? '?'}°`
           : `Координаты: —`,
@@ -427,10 +819,26 @@ function createConfirmHandler(flow) {
       }
 
       if (parsed.value === 'publish') {
-        await safeAnswerOnCallback(ctx, { notification: 'Скоро' })
-        await ctx.reply('Публикация объявлений подключим на следующем этапе. Пока черновик очищен.')
-        await clearStateRecord(runtime.user.userId)
-        await sendMainMenu(ctx, 'Готово. Вернулись в меню.')
+        await safeAnswerOnCallback(ctx, { notification: 'Публикуем...' })
+        try {
+          const { listingId, matches } = await publishListing(runtime)
+          await ctx.reply(`✅ Объявление опубликовано!\nID: ${listingId}`)
+
+          if (matches.length > 0) {
+            const heading = runtime.flow === FLOWS.LOST ? 'Похожие находки' : 'Похожие потери'
+            const items = matches
+              .map(match => ` • ${Math.round(match.score)} баллов — ${match.title}`)
+              .join('\n')
+            await ctx.reply(`${heading} поблизости:\n${items}`)
+          } else {
+            await ctx.reply('Пока совпадений не найдено. Мы пришлём уведомление, как только появятся подходящие варианты.')
+          }
+
+          await sendMainMenu(ctx, 'Что делаем дальше?')
+        } catch (error) {
+          console.error('[FSM] Ошибка публикации объявления:', error)
+          await ctx.reply('⚠️ Не удалось опубликовать объявление. Попробуйте ещё раз или позже.')
+        }
         return
       }
 
@@ -471,7 +879,7 @@ function buildConfirmKeyboard(flow) {
   ])
 }
 
-function buildFlowPayload(flow, action, value = '') {
+export function buildFlowPayload(flow, action, value = '') {
   const parts = ['flow', flow, action]
   if (value) {
     parts.push(value)
@@ -489,6 +897,435 @@ function describeCategory(categoryId) {
 
 function matchesFlowKeyword(lower, flow) {
   return FLOW_KEYWORDS[flow]?.some(keyword => lower === keyword || lower.startsWith(`${keyword} `))
+}
+
+function isAttributesStep(step) {
+  return step === STEPS.LOST_ATTRIBUTES || step === STEPS.FOUND_ATTRIBUTES
+}
+
+function getCategoryFields(flow, category) {
+  if (!category) {
+    return []
+  }
+  return CATEGORY_FIELD_SETS[category] ?? []
+}
+
+function getAttributeField(flow, category, key) {
+  if (!key) {
+    return null
+  }
+  return getCategoryFields(flow, category).find(field => field.key === key) ?? null
+}
+
+function prepareAttributesPayload(payload, flow) {
+  const nextPayload = clonePayload(payload ?? createInitialPayload(flow))
+  nextPayload.meta = nextPayload.meta ?? {}
+  nextPayload.listing = nextPayload.listing ?? createEmptyListing(flow)
+  nextPayload.listing.attributes = nextPayload.listing.attributes ?? {}
+
+  const fields = getCategoryFields(flow, nextPayload.listing.category)
+
+  if (fields.length === 0) {
+    delete nextPayload.meta.currentAttributeKey
+    return { payload: nextPayload, field: null }
+  }
+
+  const currentKey = nextPayload.meta.currentAttributeKey
+  if (currentKey && !hasAttributeAnswer(nextPayload.listing.attributes, currentKey)) {
+    const currentField = fields.find(field => field.key === currentKey)
+    if (currentField) {
+      return { payload: nextPayload, field: currentField }
+    }
+  }
+
+  const nextField = fields.find(field => !hasAttributeAnswer(nextPayload.listing.attributes, field.key))
+
+  if (!nextField) {
+    delete nextPayload.meta.currentAttributeKey
+    return { payload: nextPayload, field: null }
+  }
+
+  nextPayload.meta.currentAttributeKey = nextField.key
+  return { payload: nextPayload, field: nextField }
+}
+
+function hasAttributeAnswer(attributes = {}, key) {
+  return Object.prototype.hasOwnProperty.call(attributes ?? {}, key)
+}
+
+function formatAttributeQuestion(field, flow) {
+  if (!field) {
+    return ''
+  }
+
+  if (typeof field.question === 'string') {
+    return field.question
+  }
+
+  return field.question?.[flow] ?? field.question?.default ?? ''
+}
+
+function formatAttributeHint(field, flow) {
+  if (!field?.hint) {
+    return ''
+  }
+
+  const hint = typeof field.hint === 'string'
+    ? field.hint
+    : field.hint?.[flow] ?? field.hint?.default ?? ''
+
+  return hint ? `💡 ${hint}` : ''
+}
+
+function buildAttributeLines(flow, listing = {}) {
+  const attributes = listing.attributes ?? {}
+  const category = listing.category
+  const fields = getCategoryFields(flow, category)
+
+  return fields
+    .filter(field => hasAttributeAnswer(attributes, field.key))
+    .map(field => {
+      const value = attributes[field.key]
+      if (value === null || value === undefined || String(value).trim() === '') {
+        return `${field.label ?? field.key}: (пропущено)`
+      }
+      return `${field.label ?? field.key}: ${String(value).trim()}`
+    })
+}
+
+function extractPhotoAttachments(message) {
+  const attachments = message?.body?.attachments ?? []
+  if (!Array.isArray(attachments)) {
+    return []
+  }
+
+  return attachments
+    .filter(att => att && att.type === 'image' && att.payload)
+    .map(att => ({
+      id: String(att.payload.photo_id ?? att.payload.token ?? `${Date.now()}-${Math.random()}`),
+      type: 'image',
+      url: att.payload.url,
+      token: att.payload.token
+    }))
+}
+
+function appendPhotoAttachments(listing, attachments, limit) {
+  const existing = new Set((listing.photos ?? []).map(photo => photo.id))
+  let added = 0
+  let skipped = 0
+
+  for (const attachment of attachments) {
+    if (listing.photos.length >= limit) {
+      skipped += 1
+      continue
+    }
+
+    if (existing.has(attachment.id)) {
+      skipped += 1
+      continue
+    }
+
+    listing.photos.push(attachment)
+    existing.add(attachment.id)
+    added += 1
+  }
+
+  return { added, skipped }
+}
+
+function extractLocationAttachment(message) {
+  const attachments = message?.body?.attachments ?? []
+  if (!Array.isArray(attachments)) {
+    return null
+  }
+
+  const locationAttachment = attachments.find(att => att && att.type === 'location')
+  if (!locationAttachment) {
+    return null
+  }
+
+  const latitude = Number(locationAttachment.latitude)
+  const longitude = Number(locationAttachment.longitude)
+
+  if (Number.isNaN(latitude) || Number.isNaN(longitude)) {
+    return null
+  }
+
+  return { latitude, longitude }
+}
+
+function generalizeLocation(flow, point) {
+  if (!point) {
+    return { public: null, original: null }
+  }
+
+  const original = {
+    latitude: Number(point.latitude),
+    longitude: Number(point.longitude)
+  }
+
+  if (flow === FLOWS.FOUND) {
+    const lat = roundCoordinate(original.latitude, 0.01)
+    const lng = roundCoordinate(original.longitude, 0.01)
+    return {
+      public: {
+        latitude: lat,
+        longitude: lng,
+        precision: 'area'
+      },
+      original: original
+    }
+  }
+
+  return {
+    public: {
+      latitude: original.latitude,
+      longitude: original.longitude,
+      precision: 'point'
+    },
+    original: original
+  }
+}
+
+function roundCoordinate(value, step) {
+  return Math.round(value / step) * step
+}
+
+async function publishListing(runtime) {
+  const listing = runtime.payload?.listing
+  if (!listing) {
+    throw new Error('Пустой черновик объявления')
+  }
+
+  const flow = runtime.flow ?? (listing.type === 'LOST' ? FLOWS.LOST : FLOWS.FOUND)
+  const payload = buildListingPayload(flow, listing)
+  const authorId = runtime.user?.userId
+
+  if (!authorId) {
+    throw new Error('Не удалось определить пользователя')
+  }
+
+  const listingId = await persistListing(authorId, payload)
+  const matches = await findPotentialMatches({
+    id: listingId,
+    ...payload
+  })
+
+  await clearStateRecord(authorId)
+
+  return { listingId, matches }
+}
+
+function buildListingPayload(flow, listing) {
+  if (!listing?.category) {
+    throw new Error('Категория не выбрана')
+  }
+
+  const type = listing.type ?? (flow === FLOWS.LOST ? 'LOST' : 'FOUND')
+  const category = listing.category
+  const attributes = listing.attributes ?? {}
+  const fields = getCategoryFields(flow, category)
+
+  const primaryField = fields.find(field => {
+    const value = attributes[field.key]
+    return value !== null && value !== undefined && String(value).trim() !== ''
+  })
+
+  const subject = primaryField
+    ? String(attributes[primaryField.key]).trim()
+    : categoryTitle(category)
+
+  const verb = flow === FLOWS.LOST ? 'Потеряно' : 'Найдено'
+  const title = `${verb}: ${subject}`
+
+  const attributeLines = buildAttributeLines(flow, listing)
+  const descriptionParts = []
+
+  if (attributeLines.length > 0) {
+    descriptionParts.push('Характеристики:')
+    attributeLines.forEach(line => descriptionParts.push(`- ${line}`))
+  }
+
+  if (listing.locationNote) {
+    descriptionParts.push(`Локация: ${listing.locationNote}`)
+  }
+
+  if (flow === FLOWS.FOUND) {
+    descriptionParts.push('Точная точка будет доступна владельцу после проверки.')
+  }
+
+  const description = descriptionParts.join('\n')
+  listing.details = description
+
+  const lat = normalizeCoordinate(listing.location?.latitude)
+  const lng = normalizeCoordinate(listing.location?.longitude)
+  const occurredAt = formatMysqlDatetime(listing.occurredAt)
+
+  const photos = (listing.photos ?? [])
+    .map(extractPhotoUrl)
+    .filter(Boolean)
+    .slice(0, 3)
+
+  const secrets = Array.isArray(listing.encryptedSecrets)
+    ? listing.encryptedSecrets.filter(Boolean).slice(0, 3)
+    : []
+
+  return {
+    type,
+    category,
+    title,
+    description,
+    lat,
+    lng,
+    occurredAt,
+    photos,
+    secrets
+  }
+}
+
+function categoryTitle(categoryId) {
+  return CATEGORY_OPTIONS.find(option => option.id === categoryId)?.title ?? categoryId
+}
+
+function extractPhotoUrl(photo) {
+  if (!photo) {
+    return null
+  }
+
+  if (photo.url) {
+    return photo.url
+  }
+
+  if (photo.token) {
+    return `max-photo-token:${photo.token}`
+  }
+
+  return null
+}
+
+function normalizeCoordinate(value) {
+  const num = Number(value)
+  if (!Number.isFinite(num)) {
+    return null
+  }
+  return num
+}
+
+async function persistListing(authorId, payload) {
+  const id = crypto.randomUUID()
+
+  await pool.query(
+    'INSERT INTO listings (id, author_id, type, category, title, description, lat, lng, occurred_at) VALUES (?,?,?,?,?,?,?,?,?)',
+    [
+      id,
+      authorId,
+      payload.type,
+      payload.category,
+      payload.title,
+      payload.description,
+      payload.lat,
+      payload.lng,
+      payload.occurredAt
+    ]
+  )
+
+  for (const url of payload.photos) {
+    await pool.query(
+      'INSERT INTO photos (id, listing_id, url) VALUES (?,?,?)',
+      [crypto.randomUUID(), id, url]
+    )
+  }
+
+  for (const secret of payload.secrets) {
+    await pool.query(
+      'INSERT INTO secrets (id, listing_id, cipher) VALUES (?,?,?)',
+      [crypto.randomUUID(), id, JSON.stringify(secret)]
+    )
+  }
+
+  return id
+}
+
+async function findPotentialMatches(newListing) {
+  if (newListing.lat === null || newListing.lng === null || newListing.lat === undefined || newListing.lng === undefined) {
+    return []
+  }
+
+  const oppositeType = newListing.type === 'LOST' ? 'FOUND' : 'LOST'
+  const params = [oppositeType]
+  let where = 'status="ACTIVE" AND type=?'
+
+  if (newListing.category) {
+    where += ' AND category=?'
+    params.push(newListing.category)
+  }
+
+  const radiusKm = 5
+  const radiusDeg = radiusKm / 111
+  where += ' AND lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?'
+  params.push(
+    newListing.lat - radiusDeg,
+    newListing.lat + radiusDeg,
+    newListing.lng - radiusDeg,
+    newListing.lng + radiusDeg
+  )
+
+  const [rows] = await pool.query(
+    `SELECT id, type, category, title, description, lat, lng, occurred_at, created_at 
+     FROM listings 
+     WHERE ${where}
+     ORDER BY created_at DESC
+     LIMIT 50`,
+    params
+  )
+
+  const baseListing = {
+    id: newListing.id ?? '',
+    type: newListing.type,
+    category: newListing.category,
+    title: newListing.title,
+    occurred_at: newListing.occurredAt,
+    lat: newListing.lat,
+    lng: newListing.lng
+  }
+
+  return rows
+    .map(row => ({
+      id: row.id,
+      type: row.type,
+      category: row.category,
+      title: row.title,
+      description: row.description,
+      lat: Number(row.lat),
+      lng: Number(row.lng),
+      occurred_at: row.occurred_at ?? row.created_at
+    }))
+    .map(candidate => {
+      const score = baseListing.type === 'LOST'
+        ? computeMatchScore(baseListing, candidate)
+        : computeMatchScore(candidate, baseListing)
+
+      return {
+        id: candidate.id,
+        title: candidate.title ?? 'Без названия',
+        score
+      }
+    })
+    .filter(item => Number.isFinite(item.score))
+    .sort((a, b) => b.score - a.score)
+    .filter(item => item.score >= 50)
+    .slice(0, 3)
+}
+
+function formatMysqlDatetime(value) {
+  const date = value ? new Date(value) : new Date()
+
+  if (Number.isNaN(date.getTime())) {
+    return null
+  }
+
+  const iso = date.toISOString()
+  return iso.slice(0, 19).replace('T', ' ')
 }
 
 function parseFlowPayload(rawPayload) {
@@ -590,10 +1427,14 @@ function createEmptyListing(flow) {
     type: flow === FLOWS.LOST ? 'LOST' : 'FOUND',
     category: null,
     details: '',
+    attributes: {},
     photos: [],
     location: null,
+    locationOriginal: null,
     locationNote: '',
-    secrets: []
+    secrets: [],
+    encryptedSecrets: [],
+    pendingSecrets: []
   }
 }
 
@@ -627,12 +1468,25 @@ async function transitionToStep(ctx, userProfile, step, payload, options = {}) {
     return
   }
 
-  await saveStateRecord(userProfile.userId, step, payload)
+  let effectiveStep = step
+  let effectivePayload = payload ?? createInitialPayload(flow)
+
+  if (isAttributesStep(effectiveStep)) {
+    const prepared = prepareAttributesPayload(effectivePayload, flow)
+    effectivePayload = prepared.payload
+
+    if (!prepared.field) {
+      const nextStep = FLOW_STEP_MAP[flow].PHOTO
+      return transitionToStep(ctx, userProfile, nextStep, effectivePayload, options)
+    }
+  }
+
+  await saveStateRecord(userProfile.userId, effectiveStep, effectivePayload)
 
   if (skipIntro) {
-    const handler = StepHandlers[step]
+    const handler = StepHandlers[effectiveStep]
     if (handler?.enter) {
-      await handler.enter(ctx, createRuntime(userProfile, { step, payload }))
+      await handler.enter(ctx, createRuntime(userProfile, { step: effectiveStep, payload: effectivePayload }))
     }
     return
   }
@@ -641,9 +1495,9 @@ async function transitionToStep(ctx, userProfile, step, payload, options = {}) {
     await ctx.reply(`${FLOW_COPY[flow].emoji} Начинаем сценарий «${FLOW_COPY[flow].label}».`)
   }
 
-  const handler = StepHandlers[step]
+  const handler = StepHandlers[effectiveStep]
   if (handler?.enter) {
-    await handler.enter(ctx, createRuntime(userProfile, { step, payload }))
+    await handler.enter(ctx, createRuntime(userProfile, { step: effectiveStep, payload: effectivePayload }))
   }
 }
 
