@@ -83,6 +83,23 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   INDEX idx_chat_messages_chat (chat_id, created_at)
 );
 
+CREATE TABLE IF NOT EXISTS notifications (
+  id          VARCHAR(36) PRIMARY KEY,
+  user_id     VARCHAR(36) NOT NULL,
+  chat_id     VARCHAR(36),
+  listing_id  VARCHAR(36),
+  type        VARCHAR(64) NOT NULL,
+  title       VARCHAR(160),
+  body        TEXT,
+  payload     JSON,
+  status      ENUM('UNREAD','ACTION','READ','RESOLVED','ARCHIVED') DEFAULT 'UNREAD',
+  created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  read_at     TIMESTAMP NULL,
+  INDEX idx_notifications_user (user_id, status, created_at),
+  INDEX idx_notifications_chat (chat_id, status)
+);
+
 CREATE TABLE IF NOT EXISTS states (
   user_id     VARCHAR(36) PRIMARY KEY,
   step        VARCHAR(64) NOT NULL,

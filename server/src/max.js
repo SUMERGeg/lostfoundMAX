@@ -2,18 +2,14 @@ import 'dotenv/config'
 import { Bot } from '@maxhub/max-bot-api'
 import pool from './db.js'
 import {
-  buildMainMenuKeyboard,
-  buildFlowPayload,
   handleMessage as handleFlowMessage,
-  handleCallback as handleFlowCallback
+  handleCallback as handleFlowCallback,
+  sendMainMenu
 } from './fsm.js'
 import { upsertUserContact } from './users.js'
 
 const MAX_API_BASE = process.env.MAX_API_BASE
 const MAX_BOT_TOKEN = process.env.MAX_BOT_TOKEN
-const FRONT_ORIGIN = (process.env.FRONT_ORIGIN || 'http://localhost:5173').trim()
-const IS_FRONT_LINK_ALLOWED = FRONT_ORIGIN.startsWith('https://')
-
 let botInstance = null
 
 function ensureBot() {
@@ -51,25 +47,13 @@ function ensureBot() {
 
   bot.on('bot_started', async ctx => {
     await ctx.reply(
-      '👋 Добро пожаловать в Lost&Found!\n\nЗдесь вы можете найти потерянные вещи или помочь вернуть находки владельцам.',
-      {
-        attachments: [buildMainMenuKeyboard()]
-      }
+      '👋 Добро пожаловать в Lost&Found!\n\nЗдесь вы можете найти потерянные вещи или помочь вернуть находки владельцам.'
     )
-
-    if (!IS_FRONT_LINK_ALLOWED && FRONT_ORIGIN) {
-      await ctx.reply(`Мини-приложение: ${FRONT_ORIGIN}`)
-    }
+    await sendMainMenu(ctx, 'Что делаем дальше?')
   })
 
   bot.command('start', async ctx => {
-    await ctx.reply('Готово! Выберите действие из меню:', {
-      attachments: [buildMainMenuKeyboard()]
-    })
-
-    if (!IS_FRONT_LINK_ALLOWED && FRONT_ORIGIN) {
-      await ctx.reply(`Мини-приложение: ${FRONT_ORIGIN}`)
-    }
+    await sendMainMenu(ctx, 'Готово! Выберите действие из меню:')
   })
 
   bot.command('stats', async ctx => {

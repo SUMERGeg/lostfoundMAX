@@ -11,16 +11,27 @@ import {
   fetchChatMembers,
   appendSystemMessage
 } from './chat.js'
+import {
+  NotificationStatus,
+  NotificationType,
+  createNotification,
+  upsertNotification,
+  listNotifications,
+  markNotificationRead
+} from './notifications.js'
 
 const { inlineKeyboard, button } = Keyboard
 
 const FRONT_URL = (process.env.FRONT_ORIGIN || 'http://localhost:5173').trim()
 const IS_FRONT_LINK_ALLOWED = FRONT_URL.startsWith('https://')
+const VK_DOBRO_URL = (process.env.VK_DOBRO_URL || '').trim()
+const IS_DOBRO_LINK_ALLOWED = VK_DOBRO_URL.startsWith('https://')
 
 export const FLOWS = {
   LOST: 'lost',
   FOUND: 'found',
-  OWNER: 'owner'
+  OWNER: 'owner',
+  VOLUNTEER: 'volunteer'
 }
 
 export const STEPS = {
@@ -39,7 +50,10 @@ export const STEPS = {
   FOUND_CONFIRM: 'found_confirm',
   OWNER_CHECK_INTRO: 'owner_check_intro',
   OWNER_CHECK_QUESTION: 'owner_check_question',
-  OWNER_CHECK_WAITING: 'owner_check_waiting'
+  OWNER_CHECK_WAITING: 'owner_check_waiting',
+  VOLUNTEER_LOCATION: 'volunteer_location',
+  VOLUNTEER_INTRO: 'volunteer_intro',
+  VOLUNTEER_LIST: 'volunteer_list'
 }
 
 const FLOW_STEP_MAP = {
@@ -63,6 +77,11 @@ const FLOW_STEP_MAP = {
     INTRO: STEPS.OWNER_CHECK_INTRO,
     QUESTION: STEPS.OWNER_CHECK_QUESTION,
     WAITING: STEPS.OWNER_CHECK_WAITING
+  },
+  [FLOWS.VOLUNTEER]: {
+    LOCATION: STEPS.VOLUNTEER_LOCATION,
+    INTRO: STEPS.VOLUNTEER_INTRO,
+    LIST: STEPS.VOLUNTEER_LIST
   }
 }
 
@@ -76,8 +95,11 @@ const STEP_TO_FLOW = Object.entries(FLOW_STEP_MAP).reduce((acc, [flow, mapping])
 const FLOW_START_STEP = {
   [FLOWS.LOST]: FLOW_STEP_MAP[FLOWS.LOST].CATEGORY,
   [FLOWS.FOUND]: FLOW_STEP_MAP[FLOWS.FOUND].CATEGORY,
-  [FLOWS.OWNER]: FLOW_STEP_MAP[FLOWS.OWNER].INTRO
+  [FLOWS.OWNER]: FLOW_STEP_MAP[FLOWS.OWNER].INTRO,
+  [FLOWS.VOLUNTEER]: FLOW_STEP_MAP[FLOWS.VOLUNTEER].INTRO
 }
+
+const AUXILIARY_FLOWS = new Set(['menu'])
 
 const FLOW_STEP_SEQUENCE = {
   [FLOWS.LOST]: [
@@ -100,6 +122,11 @@ const FLOW_STEP_SEQUENCE = {
     FLOW_STEP_MAP[FLOWS.OWNER].INTRO,
     FLOW_STEP_MAP[FLOWS.OWNER].QUESTION,
     FLOW_STEP_MAP[FLOWS.OWNER].WAITING
+  ],
+  [FLOWS.VOLUNTEER]: [
+    FLOW_STEP_MAP[FLOWS.VOLUNTEER].INTRO,
+    FLOW_STEP_MAP[FLOWS.VOLUNTEER].LOCATION,
+    FLOW_STEP_MAP[FLOWS.VOLUNTEER].LIST
   ]
 }
 
@@ -325,6 +352,9 @@ const CATEGORY_FIELD_SETS = {
   ]
 }
 
+const VOLUNTEER_CATEGORY = 'pet'
+const VOLUNTEER_LIST_LIMIT = 5
+
 function normalizeCategoryId(category) {
   if (!category) {
     return category
@@ -342,8 +372,11 @@ const ATTRIBUTE_STEP_LABEL = 'Шаг 2/6 — описание'
 
 const FLOW_KEYWORDS = {
   [FLOWS.LOST]: ['потерял', 'потеряла', 'потеряли', '/lost'],
-  [FLOWS.FOUND]: ['нашёл', 'нашел', 'нашла', 'нашли', '/found']
+  [FLOWS.FOUND]: ['нашёл', 'нашел', 'нашла', 'нашли', '/found'],
+  [FLOWS.VOLUNTEER]: ['волонтёрить', 'волонтерить', '/volunteer']
 }
+
+const NOTIFICATION_KEYWORDS = new Set(['уведомления', 'уведомление', 'notifications', '/notifications'])
 
 const CANCEL_KEYWORDS = ['/cancel', 'отмена']
 const BACK_KEYWORDS = ['/back', 'назад']
@@ -413,6 +446,14 @@ const FLOW_COPY = {
     emoji: '🛡️',
     label: 'Проверка владельца',
     summaryTitle: 'Проверка владельца'
+  },
+  [FLOWS.VOLUNTEER]: {
+    emoji: '🐾',
+    label: 'Волонтёрить',
+    introText:
+      'Помогаем искать потерявшихся питомцев. Ниже покажем ближайшие активные заявки по животным. Выберите карточку, чтобы посмотреть детали и связаться с владельцем.',
+    emptyText:
+      'Сейчас нет активных заявок по животным. Загляните позже или включите уведомления — сообщим, когда появится новая.'
   }
 }
 
@@ -431,7 +472,10 @@ const StepHandlers = {
   [STEPS.FOUND_CONFIRM]: createConfirmHandler(FLOWS.FOUND),
   [STEPS.OWNER_CHECK_INTRO]: createOwnerCheckIntroHandler(),
   [STEPS.OWNER_CHECK_QUESTION]: createOwnerCheckQuestionHandler(),
-  [STEPS.OWNER_CHECK_WAITING]: createOwnerCheckWaitingHandler()
+  [STEPS.OWNER_CHECK_WAITING]: createOwnerCheckWaitingHandler(),
+  [STEPS.VOLUNTEER_LOCATION]: createVolunteerLocationHandler(),
+  [STEPS.VOLUNTEER_INTRO]: createVolunteerIntroHandler(),
+  [STEPS.VOLUNTEER_LIST]: createVolunteerListHandler()
 }
 
 export function buildMainMenuKeyboard() {
@@ -439,11 +483,18 @@ export function buildMainMenuKeyboard() {
     [
       button.callback('🆘 Потерял', buildFlowPayload(FLOWS.LOST, 'start')),
       button.callback('📦 Нашёл', buildFlowPayload(FLOWS.FOUND, 'start'))
-    ],
+    ]
   ]
+
+  rows.push([button.callback('🐾 Волонтёрить', buildFlowPayload(FLOWS.VOLUNTEER, 'start'))])
+  rows.push([button.callback('🔔 Уведомления', buildFlowPayload('menu', 'notifications'))])
 
   if (IS_FRONT_LINK_ALLOWED) {
     rows.push([button.link('🗺️ Открыть карту', FRONT_URL)])
+  }
+
+  if (IS_DOBRO_LINK_ALLOWED) {
+    rows.push([button.link('❤️ Пожертвовать', VK_DOBRO_URL)])
   }
 
   return inlineKeyboard(rows)
@@ -457,6 +508,37 @@ export async function sendMainMenu(ctx, intro = 'Выберите действи
   if (!IS_FRONT_LINK_ALLOWED && FRONT_URL) {
     await ctx.reply(`Мини-приложение: ${FRONT_URL}`)
   }
+
+  if (VK_DOBRO_URL && !IS_DOBRO_LINK_ALLOWED) {
+    await ctx.reply(`❤️ Поддержите приюты через VK Добро: ${VK_DOBRO_URL}`)
+  }
+}
+
+async function showNotifications(ctx, userProfile) {
+  const notifications = await listNotifications(userProfile.userId, { limit: 10 })
+
+  if (!notifications.length) {
+    await ctx.reply(
+      '🔔 Уведомлений нет. Как только появятся новые события по вашим объявлениям или заявкам, мы сообщим здесь.'
+    )
+    return
+  }
+
+  await ctx.reply(`🔔 Уведомления (${notifications.length})`)
+
+  for (const notification of notifications) {
+    const view = buildNotificationView(notification)
+
+    if (!view?.text) {
+      continue
+    }
+
+    await ctx.reply(view.text, view.attachments ? { attachments: view.attachments } : undefined)
+
+    if (notification.status === NotificationStatus.UNREAD) {
+      await markNotificationRead(notification.id)
+    }
+  }
 }
 
 export async function handleMessage(ctx) {
@@ -467,6 +549,10 @@ export async function handleMessage(ctx) {
 
   try {
     const userProfile = await resolveUser(ctx)
+    const contactShared = Boolean(ctx.contactInfo?.tel)
+    if (contactShared) {
+      await handleContactShareEvent(userProfile.userId)
+    }
     const record = await fetchStateRecord(userProfile.userId)
     const runtime = createRuntime(userProfile, record)
 
@@ -499,6 +585,11 @@ export async function handleMessage(ctx) {
       }
 
     if (runtime.step === STEPS.IDLE) {
+      if (contactShared && !text) {
+        await ctx.reply('📱 Контакт получен. Проверьте уведомления — контакты откроются автоматически.')
+        return
+      }
+
       if (matchesFlowKeyword(lower, FLOWS.LOST)) {
         await ctx.reply('Запускаем сценарий «Потерял».')
         await startFlow(ctx, FLOWS.LOST, userProfile)
@@ -508,6 +599,17 @@ export async function handleMessage(ctx) {
       if (matchesFlowKeyword(lower, FLOWS.FOUND)) {
         await ctx.reply('Запускаем сценарий «Нашёл».')
         await startFlow(ctx, FLOWS.FOUND, userProfile)
+        return
+      }
+
+      if (matchesFlowKeyword(lower, FLOWS.VOLUNTEER)) {
+        await ctx.reply('Запускаем сценарий «Волонтёрить».')
+        await startFlow(ctx, FLOWS.VOLUNTEER, userProfile)
+        return
+      }
+
+      if (NOTIFICATION_KEYWORDS.has(lower)) {
+        await showNotifications(ctx, userProfile)
         return
       }
 
@@ -572,6 +674,20 @@ export async function handleCallback(ctx) {
       return
     }
 
+    if (flow === 'menu') {
+      if (action === 'notifications') {
+        await safeAnswerOnCallback(ctx, { notification: 'Открываем уведомления' })
+        await showNotifications(ctx, userProfile)
+        return
+      }
+
+      if (action === 'show_listing') {
+        await handleShowListingAction(ctx, userProfile, value)
+        return
+      }
+
+    }
+
     const record = await fetchStateRecord(userProfile.userId)
     const runtime = createRuntime(userProfile, record)
 
@@ -580,9 +696,21 @@ export async function handleCallback(ctx) {
       return
     }
 
-    if (flow === FLOWS.OWNER && action === 'review') {
-      await handleOwnerReviewAction(ctx, userProfile, value)
-      return
+    if (flow === FLOWS.OWNER) {
+      if (action === 'review') {
+        await handleOwnerReviewAction(ctx, userProfile, value)
+        return
+      }
+
+      if (action === 'contact_request') {
+        await handleOwnerContactRequest(ctx, userProfile, value)
+        return
+      }
+
+      if (action === 'share_contact') {
+        await handleOwnerShareContactAction(ctx, userProfile, value)
+        return
+      }
     }
 
     if (runtime.step === STEPS.IDLE && flow !== FLOWS.OWNER) {
@@ -1200,10 +1328,52 @@ function createConfirmHandler(flow) {
 
         await safeAnswerOnCallback(ctx, { notification: 'Публикуем...' })
         try {
-          const { listingId, matches } = await publishListing(runtime)
+          const { listingId, listingTitle, listingType, matches } = await publishListing(runtime)
           await ctx.reply(`✅ Объявление опубликовано!\nID: ${listingId}`)
 
+          if (runtime.user?.userId) {
+            const previewTitle = formatListingTitle(listingTitle)
+            await createNotification({
+              userId: runtime.user.userId,
+              type: NotificationType.LISTING_PUBLISHED,
+              listingId,
+              title: `Опубликовано: «${previewTitle}»`,
+              body: 'Только что добавили объявление. Нажмите «Показать», чтобы увидеть карточку.',
+              status: NotificationStatus.UNREAD,
+              payload: {
+                listingId,
+                listingTitle,
+                listingType
+              }
+            })
+          }
+
           if (matches.length > 0) {
+            if (runtime.user?.userId) {
+              for (const match of matches) {
+                const score = Math.round(match.score)
+                const matchTitle = formatListingTitle(match.title)
+                await createNotification({
+                  userId: runtime.user.userId,
+                  type: NotificationType.MATCH_FOUND,
+                  listingId: match.id,
+                  title: `Совпадение (${score}%) — «${matchTitle}»`,
+                  body: [
+                    `Мы нашли объявление, которое похоже подходит.`,
+                    `Совпадение: ${score}%`
+                  ].join('\n'),
+                  status: NotificationStatus.ACTION,
+                  payload: {
+                    originId: listingId,
+                    originType: listingType,
+                    targetId: match.id,
+                    targetTitle: match.title,
+                    score
+                  }
+                })
+              }
+            }
+
             const heading = runtime.flow === FLOWS.LOST ? 'Похожие находки' : 'Похожие потери'
             const items = matches
               .map(match => `• ${Math.round(match.score)} баллов — ${match.title}`)
@@ -1350,6 +1520,114 @@ function createOwnerCheckWaitingHandler() {
     },
     onMessage: async ctx => {
       await ctx.reply('Пока ждём решение владельца. Вы получите уведомление автоматически.')
+    }
+  }
+}
+
+function createVolunteerIntroHandler() {
+  return {
+    enter: async (ctx, runtime) => {
+      const copy = FLOW_COPY[FLOWS.VOLUNTEER]
+      const lines = [
+        '🐾 Волонтёрим вместе!',
+        '',
+        copy.introText,
+        '',
+        'Чтобы подобрать ближайшие заявки, отправьте геопозицию с помощью вложения «📍» или напишите /skip, если хотите посмотреть общий список.',
+        '',
+        'Если хотите получать уведомления автоматически, заглядывайте в раздел «🔔 Уведомления».'
+      ]
+
+      await ctx.reply(lines.join('\n'), {
+        attachments: [buildVolunteerLocationKeyboard()]
+      })
+
+      await transitionToStep(ctx, runtime.user, STEPS.VOLUNTEER_LOCATION, runtime.payload, { skipIntro: true })
+    },
+    onMessage: async ctx => {
+      await ctx.reply('Отправьте геопозицию через вложение или напишите /skip.')
+    }
+  }
+}
+
+function createVolunteerLocationHandler() {
+  return {
+    enter: async (ctx, runtime) => {
+      await ctx.reply('Жду геопозицию. Если не получается отправить точку, напишите /skip или нажмите кнопку ниже.', {
+        attachments: [buildVolunteerLocationKeyboard()]
+      })
+    },
+    onMessage: async (ctx, runtime, message) => {
+      if (isSkipCommand(message.lower)) {
+        const nextPayload = withVolunteerPayload(runtime, volunteer => {
+          volunteer.location = null
+        })
+        await transitionToStep(ctx, runtime.user, STEPS.VOLUNTEER_LIST, nextPayload, { skipIntro: true })
+        return
+      }
+
+      if (message.location) {
+        const { latitude, longitude } = message.location
+        if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+          const nextPayload = withVolunteerPayload(runtime, volunteer => {
+            volunteer.location = { latitude, longitude }
+          })
+          await transitionToStep(ctx, runtime.user, STEPS.VOLUNTEER_LIST, nextPayload, { skipIntro: true })
+          return
+        }
+      }
+
+      await ctx.reply('Не удалось распознать геопозицию. Попробуйте снова или напишите /skip.')
+    },
+    onCallback: async (ctx, runtime, parsed) => {
+      if (parsed.action === 'location_skip') {
+        const nextPayload = withVolunteerPayload(runtime, volunteer => {
+          volunteer.location = null
+        })
+        await safeAnswerOnCallback(ctx, { notification: 'Показываю общий список' })
+        await transitionToStep(ctx, runtime.user, STEPS.VOLUNTEER_LIST, nextPayload, { skipIntro: true })
+        return
+      }
+
+      await safeAnswerOnCallback(ctx, { notification: 'Отправьте геопозицию или /skip' })
+    }
+  }
+}
+
+function createVolunteerListHandler() {
+  return {
+    enter: async (ctx, runtime) => {
+      await sendVolunteerListings(ctx, runtime)
+    },
+    onMessage: async ctx => {
+      await ctx.reply('Нажмите «🔄 Обновить» или выберите карточку из списка.')
+    },
+    onCallback: async (ctx, runtime, parsed) => {
+      if (parsed.action === 'refresh') {
+        await safeAnswerOnCallback(ctx, { notification: 'Обновляю список' })
+        await sendVolunteerListings(ctx, runtime, { refresh: true })
+        return
+      }
+
+      if (parsed.action === 'preview') {
+        await safeAnswerOnCallback(ctx, { notification: 'Открываем карточку' })
+        await handleVolunteerListingTap(ctx, runtime, parsed.value)
+        return
+      }
+
+      if (parsed.action === 'accept') {
+        await safeAnswerOnCallback(ctx, { notification: 'Сообщаем владельцу' })
+        await handleVolunteerAcceptAction(ctx, runtime, parsed.value)
+        return
+      }
+
+      if (parsed.action === 'back') {
+        await safeAnswerOnCallback(ctx, { notification: 'Возвращаю список' })
+        await handleVolunteerBackAction(ctx, runtime)
+        return
+      }
+
+      await safeAnswerOnCallback(ctx, { notification: 'Действие не поддерживается' })
     }
   }
 }
@@ -1536,7 +1814,10 @@ async function launchOwnerCheck(ctx, userProfile, runtime, { lostListing, foundL
 
   if (chat.status === 'ACTIVE' || chat.status === 'CLOSED') {
     await safeAnswerOnCallback(ctx, { notification: 'Контакты уже раскрыты' })
-    await revealContacts(foundListing.author_id, lostListing.author_id)
+    await revealContacts(foundListing.author_id, lostListing.author_id, {
+      chatId: chat.id,
+      listingTitle: foundListing.title ?? lostListing.title
+    })
     return
   }
 
@@ -1593,26 +1874,351 @@ async function handleOwnerReviewAction(ctx, userProfile, value) {
     return
   }
 
+  const foundTitle = await fetchListingTitle(chat.found_listing_id)
+  const lostTitle = await fetchListingTitle(chat.lost_listing_id)
+
   if (decision === 'confirm') {
-    await updateChatStatus(chatId, 'CLOSED')
-    await safeAnswerOnCallback(ctx, { notification: 'Владелец подтверждён' })
-    await revealContacts(holder.user_id, claimant.user_id)
+    if (chat.status === 'CLOSED') {
+      await safeAnswerOnCallback(ctx, { notification: 'Контакты уже раскрыты' })
+      await notifyUser(holder.user_id, 'Контакты уже обменены. Проверьте уведомления.')
+      return
+    }
+
+    if (chat.status === 'ACTIVE') {
+      await safeAnswerOnCallback(ctx, { notification: 'Уже ждём обмена контактами' })
+      await notifyUser(holder.user_id, 'Мы уже ждём, пока потерявший поделится контактом. Напомните ему при необходимости.')
+      return
+    }
+
+    await updateChatStatus(chatId, 'ACTIVE')
+    await safeAnswerOnCallback(ctx, { notification: 'Ответы совпали' })
+
+    const exchangeKeyboard = inlineKeyboard([
+      [button.callback('🤝 Обменяться контактами', buildFlowPayload(FLOWS.OWNER, 'contact_request', chatId))]
+    ])
+
+    await notifyUser(
+      holder.user_id,
+      [
+        '✅ Ответы совпали!',
+        '',
+        'Нажмите «Обменяться контактами», чтобы отправить запрос владельцу. После этого он увидит вашу карточку в уведомлениях.'
+      ].join('\n'),
+      [exchangeKeyboard]
+    )
+
+    await upsertNotification(
+      { userId: holder.user_id, type: NotificationType.OWNER_REVIEW, chatId },
+      {
+        title: `Заявка по находке «${formatListingTitle(foundTitle)}»`,
+        body: 'Вы подтвердили, что ответы совпадают. Запросите обмен контактами, когда будете готовы передать вещь.',
+        status: NotificationStatus.RESOLVED,
+        payload: {
+          chatId,
+          listingTitle: foundTitle
+        }
+      }
+    )
+
+    await upsertNotification(
+      { userId: holder.user_id, type: NotificationType.CONTACT_SHARE_REQUEST, chatId },
+      {
+        title: `Обмен контактами — «${formatListingTitle(foundTitle)}»`,
+        body: 'Нажмите кнопку ниже, чтобы отправить запрос владельцу на обмен контактами.',
+        status: NotificationStatus.ACTION,
+        payload: {
+          chatId,
+          listingTitle: foundTitle
+        }
+      }
+    )
+
+    if (claimant) {
+      await upsertNotification(
+        { userId: claimant.user_id, type: NotificationType.OWNER_WAITING, chatId },
+        {
+          title: `Проверка по объявлению «${formatListingTitle(foundTitle || lostTitle)}»`,
+          body: 'Нашедший подтвердил ответы. Скоро он запросит обмен контактами — следите за уведомлениями.',
+          status: NotificationStatus.UNREAD,
+          payload: {
+            chatId,
+            listingTitle: foundTitle || lostTitle
+          }
+        }
+      )
+
+      await notifyUser(
+        claimant.user_id,
+        '✅ Нашедший подтвердил ваши ответы. Как только он отправит запрос, мы попросим вас поделиться контактом.'
+      )
+    }
+
     await clearStateRecord(holder.user_id)
-    await clearStateRecord(claimant.user_id)
     return
   }
 
   if (decision === 'decline') {
     await updateChatStatus(chatId, 'DECLINED')
     await safeAnswerOnCallback(ctx, { notification: 'Ответы не совпали' })
-    await notifyUser(claimant.user_id, '⚠️ Ответы не совпали. Попробуйте перепроверить данные или создать новое объявление.')
     await notifyUser(holder.user_id, 'Вы отклонили претендента. Чат закрыт.')
-    await clearStateRecord(claimant.user_id)
+
+    await upsertNotification(
+      { userId: holder.user_id, type: NotificationType.OWNER_REVIEW, chatId },
+      {
+        title: `Заявка по находке «${formatListingTitle(foundTitle)}»`,
+        body: 'Вы отклонили претендента. Если появится другой запрос, мы сообщим.',
+        status: NotificationStatus.RESOLVED,
+        payload: {
+          chatId,
+          listingTitle: foundTitle
+        }
+      }
+    )
+
+    if (claimant) {
+      await notifyUser(
+        claimant.user_id,
+        '⚠️ Ответы не совпали. Попробуйте перепроверить данные или добавить больше деталей в объявление.'
+      )
+
+      await upsertNotification(
+        { userId: claimant.user_id, type: NotificationType.OWNER_WAITING, chatId },
+        {
+          title: `Проверка по объявлению «${formatListingTitle(foundTitle || lostTitle)}»`,
+          body: 'Ответы не совпали. Попробуйте уточнить данные или создать новое объявление.',
+          status: NotificationStatus.RESOLVED,
+          payload: {
+            chatId,
+            listingTitle: foundTitle || lostTitle
+          }
+        }
+      )
+
+      await createNotification({
+        userId: claimant.user_id,
+        type: NotificationType.OWNER_DECLINED,
+        chatId,
+        title: `Заявка отклонена — «${formatListingTitle(foundTitle || lostTitle)}»`,
+        body: 'Нашедший указал, что ответы не совпали. Попробуйте уточнить информацию или добавить дополнительные приметы.',
+        status: NotificationStatus.UNREAD,
+        payload: {
+          chatId,
+          listingTitle: foundTitle || lostTitle
+        }
+      })
+    }
+
     await clearStateRecord(holder.user_id)
     return
   }
 
   await safeAnswerOnCallback(ctx, { notification: 'Действие не поддерживается' })
+}
+
+async function handleOwnerContactRequest(ctx, userProfile, chatId) {
+  if (!chatId) {
+    await safeAnswerOnCallback(ctx, { notification: 'Чат не найден' })
+    return
+  }
+
+  const chat = await fetchChatById(chatId)
+  if (!chat) {
+    await safeAnswerOnCallback(ctx, { notification: 'Чат уже завершён' })
+    return
+  }
+
+  const participants = await fetchChatMembers(chatId)
+  const holder = participants.find(member => member.role === 'HOLDER')
+  const claimant = participants.find(member => member.role === 'CLAIMANT')
+
+  if (!holder || holder.user_id !== userProfile.userId) {
+    await safeAnswerOnCallback(ctx, { notification: 'У вас нет прав на это действие' })
+    return
+  }
+
+  if (chat.status === 'DECLINED') {
+    await safeAnswerOnCallback(ctx, { notification: 'Заявка уже отклонена' })
+    return
+  }
+
+  if (chat.status === 'PENDING') {
+    await safeAnswerOnCallback(ctx, { notification: 'Сначала подтвердите совпадение ответов' })
+    return
+  }
+
+  if (chat.status === 'CLOSED') {
+    await safeAnswerOnCallback(ctx, { notification: 'Контакты уже раскрыты' })
+    await notifyUser(holder.user_id, 'Контакты уже обменены. Проверьте уведомления.')
+    return
+  }
+
+  await safeAnswerOnCallback(ctx, { notification: 'Запрос отправлен' })
+
+  const foundTitle = await fetchListingTitle(chat.found_listing_id)
+
+  await upsertNotification(
+    { userId: holder.user_id, type: NotificationType.CONTACT_SHARE_REQUEST, chatId },
+    {
+      title: `Обмен контактами — «${formatListingTitle(foundTitle)}»`,
+      body: 'Запрос отправлен потерявшему. Ждём, пока он поделится контактом.',
+      status: NotificationStatus.RESOLVED,
+      payload: {
+        chatId,
+        listingTitle: foundTitle
+      }
+    }
+  )
+
+  await notifyUser(
+    holder.user_id,
+    'Запрос отправлен владельцу. Как только он поделится контактом, мы откроем данные в уведомлениях.'
+  )
+
+  if (!claimant) {
+    return
+  }
+
+  const holderContact = await fetchUserContact(holder.user_id)
+  const claimantContact = await fetchUserContact(claimant.user_id)
+  const claimantHasPhone = Boolean(claimantContact?.phone)
+
+  if (claimantHasPhone) {
+    await finalizeContactExchange(chatId, {
+      listingTitle: foundTitle
+    })
+    return
+  }
+
+  const maskedBody = [
+    `Пользователь, нашедший «${formatListingTitle(foundTitle)}», готов связаться.`,
+    '',
+    formatContactAnnouncement('нашедшего', holderContact, { maskPhone: true, postscript: '' }),
+    '',
+    'Поделитесь своим номером, чтобы открыть телефон нашедшего.'
+  ].join('\n')
+
+  await upsertNotification(
+    { userId: claimant.user_id, type: NotificationType.OWNER_APPROVED, chatId },
+    {
+      title: `Связаться по объявлению «${formatListingTitle(foundTitle)}»`,
+      body: maskedBody,
+      status: NotificationStatus.ACTION,
+      payload: {
+        chatId,
+        listingTitle: foundTitle
+      }
+    }
+  )
+
+  await upsertNotification(
+    { userId: claimant.user_id, type: NotificationType.OWNER_WAITING, chatId },
+    {
+      status: NotificationStatus.RESOLVED,
+      payload: {
+        chatId,
+        listingTitle: foundTitle
+      }
+    }
+  )
+
+  await notifyUser(
+    claimant.user_id,
+    [
+      '🔔 Нашедший подтвердил совпадение и готов связаться.',
+      '',
+      'Нажмите «Поделиться контактом» в уведомлениях — мы откроем телефон нашедшего после того, как вы отправите свой номер.'
+    ].join('\n')
+  )
+}
+
+async function handleOwnerShareContactAction(ctx, userProfile, chatId) {
+  if (!chatId) {
+    await safeAnswerOnCallback(ctx, { notification: 'Чат не найден' })
+    return
+  }
+
+  const chat = await fetchChatById(chatId)
+  if (!chat) {
+    await safeAnswerOnCallback(ctx, { notification: 'Чат уже завершён' })
+    return
+  }
+
+  const participants = await fetchChatMembers(chatId)
+  const holder = participants.find(member => member.role === 'HOLDER')
+  const claimant = participants.find(member => member.role === 'CLAIMANT')
+
+  if (!claimant || claimant.user_id !== userProfile.userId) {
+    await safeAnswerOnCallback(ctx, { notification: 'У вас нет доступа к этому запросу' })
+    return
+  }
+
+  if (chat.status === 'PENDING') {
+    await safeAnswerOnCallback(ctx, { notification: 'Запрос ещё не отправлен нашедшим' })
+    return
+  }
+
+  if (chat.status === 'CLOSED') {
+    await safeAnswerOnCallback(ctx, { notification: 'Контакты уже раскрыты' })
+    await notifyUser(claimant.user_id, 'Контакты уже доступны. Проверьте уведомления.')
+    return
+  }
+
+  const claimantContact = await fetchUserContact(claimant.user_id)
+  if (claimantContact?.phone) {
+    await safeAnswerOnCallback(ctx, { notification: 'Контакт уже передан' })
+    await finalizeContactExchange(chatId, {
+      listingTitle: await fetchListingTitle(chat.found_listing_id)
+    })
+    return
+  }
+
+  await safeAnswerOnCallback(ctx, { notification: 'Ждём номер' })
+
+  const shareKeyboard = inlineKeyboard([[button.requestContact('Отправить номер из MAX')]])
+
+  await ctx.reply(
+    [
+      'Чтобы открыть контакты нашедшего, поделитесь своим номером.',
+      '',
+      'Нажмите кнопку «Отправить номер из MAX» ниже. Если кнопка не работает, воспользуйтесь стандартной функцией MAX «Поделиться контактом».'
+    ].join('\n'),
+    { attachments: [shareKeyboard] }
+  )
+}
+
+async function handleShowListingAction(ctx, userProfile, listingId) {
+  if (!listingId) {
+    await safeAnswerOnCallback(ctx, { notification: 'ID объявления не передан' })
+    return
+  }
+
+  let listing = await fetchListingForPreview(listingId, userProfile.userId)
+
+  if (!listing) {
+    const allowed = await userHasListingAccess(userProfile.userId, listingId)
+    if (!allowed) {
+      await safeAnswerOnCallback(ctx, { notification: 'Объявление недоступно' })
+      return
+    }
+    listing = await fetchListingForPreview(listingId)
+  }
+
+  if (!listing) {
+    await safeAnswerOnCallback(ctx, { notification: 'Объявление недоступно' })
+    return
+  }
+
+  await safeAnswerOnCallback(ctx, { notification: 'Показываю карточку' })
+
+  const message = formatListingPreview(listing)
+  const attachments = buildListingPreviewAttachments(listing)
+
+  if (attachments) {
+    await ctx.reply(message, { attachments })
+    return
+  }
+
+  await ctx.reply(message)
 }
 
 function parseMatchValue(value = '') {
@@ -1676,6 +2282,18 @@ async function fetchUserMaxId(userId) {
   return rows[0].max_id
 }
 
+async function fetchListingTitle(listingId) {
+  if (!listingId) {
+    return null
+  }
+
+  const [rows] = await pool.query('SELECT title FROM listings WHERE id = ? LIMIT 1', [listingId])
+  if (rows.length === 0) {
+    return null
+  }
+  return rows[0].title ?? null
+}
+
 async function fetchListingWithSecrets(listingId) {
   const [rows] = await pool.query('SELECT * FROM listings WHERE id = ? LIMIT 1', [listingId])
   if (rows.length === 0) {
@@ -1737,15 +2355,145 @@ async function notifyOwnerForReview(ownerCheck) {
     [keyboard]
   )
 
+  const holderTitle = `Заявка по находке «${formatListingTitle(foundTitle)}»`
+  await upsertNotification(
+    { userId: holderId, type: NotificationType.OWNER_REVIEW, chatId },
+    {
+      title: holderTitle,
+      body: [
+        'Пользователь утверждает, что вещь принадлежит ему.',
+        '',
+        summaryText,
+        '',
+        'Сравните ответы с вашими секретами и решите, совпадает ли всё.'
+      ].join('\n'),
+      status: NotificationStatus.ACTION,
+      payload: {
+        chatId,
+        answers,
+        questions,
+        listingTitle: foundTitle
+      }
+    }
+  )
+
   if (claimantId) {
     await notifyUser(
       claimantId,
       '📨 Мы отправили ваши ответы человеку, который нашёл предмет. Как только он подтвердит совпадение, мы поделимся контактами.'
     )
+
+    await upsertNotification(
+      { userId: claimantId, type: NotificationType.OWNER_WAITING, chatId },
+      {
+        title: `Проверка по объявлению «${formatListingTitle(foundTitle)}»`,
+        body: '⌛ Ждём подтверждения найденного. Как только найдётся совпадение, вы увидите результат в уведомлениях.',
+        status: NotificationStatus.UNREAD,
+        payload: {
+          chatId,
+          listingTitle: foundTitle
+        }
+      }
+    )
   }
 }
 
-async function revealContacts(holderId, claimantId) {
+async function handleContactShareEvent(userId) {
+  if (!userId) {
+    return
+  }
+
+  const chatIds = new Map()
+
+  const [notificationRows] = await pool.query(
+    `SELECT chat_id, payload FROM notifications
+     WHERE user_id = ?
+       AND type = ?
+       AND status = ?`,
+    [userId, NotificationType.OWNER_APPROVED, NotificationStatus.ACTION]
+  )
+
+  for (const row of notificationRows) {
+    if (!row.chat_id) continue
+    let payload = {}
+    try {
+      payload = row.payload ? JSON.parse(row.payload) : {}
+    } catch {
+      payload = {}
+    }
+    if (!chatIds.has(row.chat_id)) {
+      chatIds.set(row.chat_id, payload?.listingTitle ?? null)
+    }
+  }
+
+  if (chatIds.size === 0) {
+    const [activeChats] = await pool.query(
+      `SELECT id, found_listing_id, lost_listing_id
+       FROM chats
+       WHERE claimant_id = ?
+         AND status = 'ACTIVE'`,
+      [userId]
+    )
+
+    for (const chat of activeChats) {
+      if (!chatIds.has(chat.id)) {
+        chatIds.set(chat.id, null)
+      }
+    }
+  }
+
+  for (const [chatId, title] of chatIds) {
+    await finalizeContactExchange(chatId, { listingTitle: title })
+  }
+}
+
+async function finalizeContactExchange(chatId, { listingTitle } = {}) {
+  if (!chatId) {
+    return
+  }
+
+  const chat = await fetchChatById(chatId)
+  if (!chat || chat.status === 'CLOSED') {
+    return
+  }
+
+  const participants = await fetchChatMembers(chatId)
+  const holder = participants.find(member => member.role === 'HOLDER')
+  const claimant = participants.find(member => member.role === 'CLAIMANT')
+
+  if (!holder || !claimant) {
+    return
+  }
+
+  const effectiveListingTitle =
+    listingTitle ??
+    (await fetchListingTitle(chat.found_listing_id)) ??
+    (await fetchListingTitle(chat.lost_listing_id))
+
+  await updateChatStatus(chatId, 'CLOSED')
+
+  await revealContacts(holder.user_id, claimant.user_id, {
+    chatId,
+    listingTitle: effectiveListingTitle
+  })
+
+  await upsertNotification(
+    { userId: claimant.user_id, type: NotificationType.OWNER_WAITING, chatId },
+    {
+      status: NotificationStatus.RESOLVED,
+      payload: {
+        chatId,
+        listingTitle: effectiveListingTitle
+      }
+    }
+  )
+
+  await clearStateRecord(holder.user_id)
+  await clearStateRecord(claimant.user_id)
+}
+
+async function revealContacts(holderId, claimantId, options = {}) {
+  const { chatId = null, listingTitle = null } = options
   if (!holderId || !claimantId) {
     return
   }
@@ -1753,19 +2501,78 @@ async function revealContacts(holderId, claimantId) {
   const holder = await fetchUserContact(holderId)
   const claimant = await fetchUserContact(claimantId)
 
-  await notifyUser(
-    holderId,
-    formatContactAnnouncement('владельца', claimant)
+  const holderText = formatContactAnnouncement('владельца', claimant)
+  const claimantText = formatContactAnnouncement('нашедшего', holder)
+
+  if (holderText) {
+    await notifyUser(holderId, holderText)
+  }
+
+  if (claimantText) {
+    await notifyUser(claimantId, claimantText)
+  }
+
+  if (!chatId) {
+    return
+  }
+
+  await upsertNotification(
+    { userId: holderId, type: NotificationType.CONTACT_SHARE_REQUEST, chatId },
+    {
+      status: NotificationStatus.RESOLVED,
+      body: 'Контакты владельца открыты. Свяжитесь с ним напрямую.',
+      payload: {
+        chatId,
+        listingTitle
+      }
+    }
   )
 
-  await notifyUser(
-    claimantId,
-    formatContactAnnouncement('нашедшего', holder)
+  await upsertNotification(
+    { userId: claimantId, type: NotificationType.OWNER_APPROVED, chatId },
+    {
+      status: NotificationStatus.RESOLVED,
+      body: claimantText,
+      payload: {
+        chatId,
+        listingTitle
+      }
+    }
+  )
+
+  await upsertNotification(
+    { userId: holderId, type: NotificationType.CONTACT_AVAILABLE, chatId },
+    {
+      title: `Контакт владельца — «${formatListingTitle(listingTitle)}»`,
+      body: holderText,
+      status: NotificationStatus.UNREAD,
+      payload: {
+        chatId,
+        listingTitle
+      }
+    }
+  )
+
+  await upsertNotification(
+    { userId: claimantId, type: NotificationType.CONTACT_AVAILABLE, chatId },
+    {
+      title: `Контакт нашедшего — «${formatListingTitle(listingTitle)}»`,
+      body: claimantText,
+      status: NotificationStatus.UNREAD,
+      payload: {
+        chatId,
+        listingTitle
+      }
+    }
   )
 }
 
 function matchesFlowKeyword(lower, flow) {
   return FLOW_KEYWORDS[flow]?.some(keyword => lower === keyword || lower.startsWith(`${keyword} `))
+}
+
+function isSkipCommand(lower = '') {
+  return lower === '/skip' || lower === 'skip' || lower === 'пропустить'
 }
 
 async function fetchUserContact(userId) {
@@ -1775,19 +2582,600 @@ async function fetchUserContact(userId) {
   return rows[0]
 }
 
-function formatContactAnnouncement(roleLabel, contact) {
+function formatContactAnnouncement(roleLabel, contact, options = {}) {
+  const { maskPhone = false, postscript = 'Договоритесь о передаче и подтвердите, когда всё успешно завершится.' } = options
+
   if (!contact) {
     return `📇 Контакт ${roleLabel}: пока нет данных. Попробуйте запросить повторно или свяжитесь через мини-приложение.`
   }
 
-  const parts = [`📇 Контакт ${roleLabel}:`, `• MAX ID: ${contact.max_id}`]
+  const parts = [`📇 Контакт ${roleLabel}:`, `• MAX ID: ${contact.max_id ?? 'не указан'}`]
+
   if (contact.phone) {
-    parts.push(`• Телефон: ${contact.phone}`)
+    const phoneText = maskPhone ? maskPhoneValue(contact.phone) : contact.phone
+    parts.push(`• Телефон: ${phoneText}`)
+    if (maskPhone) {
+      parts.push('• Телефон откроется после того, как вы поделитесь своим контактом.')
+    }
   } else {
     parts.push('• Телефон: не передан (попросите поделиться контактом в MAX)')
   }
-  parts.push('', 'Договоритесь о передаче и подтвердите, когда всё успешно завершится.')
+
+  if (postscript) {
+    parts.push('', postscript)
+  }
+
   return parts.join('\n')
+}
+
+function maskPhoneValue(phone) {
+  if (!phone) {
+    return '********'
+  }
+
+  const digits = phone.replace(/\D/g, '')
+  const length = Math.max(digits.length, 8)
+  return '*'.repeat(length)
+}
+
+function buildNotificationView(notification) {
+  const statusIcon = getNotificationStatusIcon(notification.status)
+  const title = notification.title ?? getDefaultNotificationTitle(notification.type)
+  const lines = [`${statusIcon} ${title}`]
+
+  const body = notification.body?.trim?.()
+  if (body) {
+    lines.push('', body)
+  }
+
+  const attachments = buildNotificationAttachments(notification)
+
+  return {
+    text: lines.join('\n'),
+    attachments
+  }
+}
+
+function buildNotificationAttachments(notification) {
+  const payload = notification.payload ?? {}
+
+  switch (notification.type) {
+    case NotificationType.OWNER_REVIEW:
+      if (notification.status === NotificationStatus.ACTION && payload.chatId) {
+        return [buildOwnerReviewKeyboard(payload.chatId)]
+      }
+      return null
+    case NotificationType.CONTACT_SHARE_REQUEST:
+      if (notification.status !== NotificationStatus.ACTION || !payload.chatId) {
+        return null
+      }
+      return [
+        inlineKeyboard([
+          [button.callback('🤝 Обменяться контактами', buildFlowPayload(FLOWS.OWNER, 'contact_request', payload.chatId))]
+        ])
+      ]
+    case NotificationType.OWNER_APPROVED: {
+      const buttons = []
+      if (notification.status === NotificationStatus.ACTION && payload.chatId) {
+        buttons.push([
+          button.callback('📱 Поделиться контактом', buildFlowPayload(FLOWS.OWNER, 'share_contact', payload.chatId))
+        ])
+      }
+      if (notification.status === NotificationStatus.ACTION) {
+        buttons.push([button.requestContact('Отправить номер из MAX')])
+      }
+      return buttons.length > 0 ? [inlineKeyboard(buttons)] : null
+    }
+    case NotificationType.LISTING_PUBLISHED: {
+      const listingId = payload.listingId || notification.listingId
+      if (!listingId) {
+        return null
+      }
+      return [
+        inlineKeyboard([
+          [button.callback('👁️ Показать', buildFlowPayload('menu', 'show_listing', listingId))]
+        ])
+      ]
+    }
+    case NotificationType.VOLUNTEER_ASSIGNED: {
+      const listingId = payload.listingId || notification.listingId
+      if (!listingId) {
+        return null
+      }
+      return [
+        inlineKeyboard([
+          [button.callback('👁️ Показать карточку', buildFlowPayload('menu', 'show_listing', listingId))]
+        ])
+      ]
+    }
+    case NotificationType.MATCH_FOUND: {
+      const listingId = payload.targetId || notification.listingId
+      const originId = payload.originId
+      const originType = payload.originType
+      const flow = listingTypeToFlow(originType)
+
+      if (!flow || !listingId || !originId) {
+        return null
+      }
+
+      const buttons = [
+        [
+          button.callback(
+            '✉️ Проверить и связаться',
+            buildFlowPayload(flow, 'match', `${listingId}|${originId}`)
+          )
+        ]
+      ]
+
+      if (listingId) {
+        buttons.push([
+          button.callback('👁️ Показать карточку', buildFlowPayload('menu', 'show_listing', listingId))
+        ])
+      }
+
+      return [inlineKeyboard(buttons)]
+    }
+    default:
+      return null
+  }
+}
+
+function getNotificationStatusIcon(status) {
+  switch (status) {
+    case NotificationStatus.ACTION:
+      return '⏳'
+    case NotificationStatus.UNREAD:
+      return '🆕'
+    case NotificationStatus.RESOLVED:
+      return '✅'
+    case NotificationStatus.READ:
+      return '📬'
+    case NotificationStatus.ARCHIVED:
+      return '📁'
+    default:
+      return '🔔'
+  }
+}
+
+function getDefaultNotificationTitle(type) {
+  switch (type) {
+    case NotificationType.OWNER_WAITING:
+      return 'Проверка владельца'
+    case NotificationType.OWNER_REVIEW:
+      return 'Новая заявка на находку'
+    case NotificationType.OWNER_DECLINED:
+      return 'Заявка отклонена'
+    case NotificationType.OWNER_APPROVED:
+      return 'Найденный готов связаться'
+    case NotificationType.CONTACT_SHARE_REQUEST:
+      return 'Поделитесь контактом'
+    case NotificationType.CONTACT_AVAILABLE:
+      return 'Контакты доступны'
+    case NotificationType.LISTING_PUBLISHED:
+      return 'Новое объявление'
+    case NotificationType.VOLUNTEER_ASSIGNED:
+      return 'Волонтёр откликнулся'
+    case NotificationType.MATCH_FOUND:
+      return 'Появилось совпадение'
+    default:
+      return 'Уведомление'
+  }
+}
+
+function formatListingTitle(title) {
+  if (!title) {
+    return 'без названия'
+  }
+
+  const trimmed = String(title).trim()
+  if (trimmed.length <= 42) {
+    return trimmed
+  }
+  return `${trimmed.slice(0, 39)}…`
+}
+
+async function fetchListingForPreview(listingId, authorId) {
+  if (!listingId) {
+    return null
+  }
+
+  const params = authorId ? [listingId, authorId] : [listingId]
+  const [rows] = await pool.query(
+    `SELECT id, author_id, type, category, title, description, lat, lng, occurred_at, status, created_at
+     FROM listings
+     WHERE id = ?
+       ${authorId ? 'AND author_id = ?' : ''}
+     LIMIT 1`,
+    params
+  )
+
+  if (rows.length === 0) {
+    return null
+  }
+
+  const listing = rows[0]
+
+  const [photoRows] = await pool.query(
+    'SELECT url FROM photos WHERE listing_id = ? ORDER BY created_at ASC LIMIT 3',
+    [listingId]
+  )
+
+  listing.photos = photoRows.map(row => row.url)
+  return listing
+}
+
+function formatListingPreview(listing) {
+  if (!listing) {
+    return 'Карточка не найдена.'
+  }
+
+  const emoji = listing.type === 'FOUND' ? '📦' : '🆘'
+  const statusText = listing.status === 'CLOSED' ? 'закрыто' : 'активно'
+  const lines = [
+    `${emoji} ${listing.title ?? 'Без названия'}`,
+    '',
+    listing.description?.trim?.() ? listing.description.trim() : 'Описание не заполнено.'
+  ]
+
+  lines.push('', `Статус: ${statusText}`)
+
+  if (listing.occurred_at) {
+    lines.push(`Когда произошло: ${formatDisplayDate(listing.occurred_at)}`)
+  }
+
+  if (listing.created_at) {
+    lines.push(`Создано: ${formatDisplayDate(listing.created_at)}`)
+  }
+
+  if (Number.isFinite(Number(listing.lat)) && Number.isFinite(Number(listing.lng))) {
+    lines.push(`Координаты: ${formatCoordinate(listing.lat)}°, ${formatCoordinate(listing.lng)}°`)
+  }
+
+  if (Array.isArray(listing.photos) && listing.photos.length > 0) {
+    lines.push(`Фото прикреплено: ${listing.photos.length}`)
+  }
+
+  lines.push('', 'Следите за откликами в уведомлениях, мы сообщим, если появятся совпадения или ответы.')
+
+  if (!IS_FRONT_LINK_ALLOWED && FRONT_URL) {
+    lines.push('', `Мини-приложение: ${FRONT_URL}`)
+  }
+
+  return lines.join('\n')
+}
+
+function buildListingPreviewAttachments(listing) {
+  if (!listing || !IS_FRONT_LINK_ALLOWED || !FRONT_URL) {
+    return null
+  }
+
+  const url = FRONT_URL
+  return [inlineKeyboard([[button.link('🗺️ Показать на карте', url)]])]
+}
+
+async function sendVolunteerListings(ctx, runtime = { payload: {} }, { refresh = false } = {}) {
+  const volunteerData = runtime?.payload?.volunteer ?? {}
+  const location = volunteerData.location ?? null
+  const listings = await fetchVolunteerListings({ location })
+
+  if (!listings.length) {
+    await ctx.reply(FLOW_COPY[FLOWS.VOLUNTEER].emptyText)
+    return
+  }
+
+  const header = refresh ? '🔄 Обновили список заявок:' : '🔥 Активные заявки по животным:'
+  const lines = [header]
+
+  listings.forEach((listing, index) => {
+    lines.push('', `${index + 1}. ${formatVolunteerListing(listing)}`)
+  })
+
+  lines.push('', 'Выберите карточку, чтобы посмотреть детали и договориться с владельцем. Обновите список при необходимости.')
+
+  if (!location) {
+    lines.push('', 'Совет: отправьте геопозицию, чтобы мы показали объявления ближе к вам.')
+  }
+
+  if (!IS_FRONT_LINK_ALLOWED && FRONT_URL) {
+    lines.push('', `Карта животных в мини-приложении: ${FRONT_URL}`)
+  }
+
+  await ctx.reply(lines.join('\n'), { attachments: buildVolunteerKeyboard(listings) })
+}
+
+async function fetchVolunteerListings({ location = null, limit = VOLUNTEER_LIST_LIMIT } = {}) {
+  const hasLocation =
+    location &&
+    Number.isFinite(Number(location.latitude)) &&
+    Number.isFinite(Number(location.longitude))
+
+  const distanceExpression = hasLocation
+    ? `111.045 * DEGREES(
+        ACOS(
+          LEAST(
+            1.0,
+            COS(RADIANS(?)) * COS(RADIANS(lat)) * COS(RADIANS(lng) - RADIANS(?)) +
+            SIN(RADIANS(?)) * SIN(RADIANS(lat))
+          )
+        )
+      )`
+    : null
+
+  const selectColumns = [
+    'id',
+    'title',
+    'description',
+    'occurred_at',
+    'created_at'
+  ]
+
+  if (distanceExpression) {
+    selectColumns.push(`${distanceExpression} AS distance_km`)
+  }
+
+  const sql = `
+    SELECT ${selectColumns.join(', ')}
+    FROM listings
+    WHERE status = 'ACTIVE'
+      AND type = 'LOST'
+      AND category = ?
+    ORDER BY ${distanceExpression ? 'distance_km ASC, created_at DESC' : 'created_at DESC'}
+    LIMIT ?
+  `
+
+  const params = []
+  if (distanceExpression) {
+    params.push(Number(location.latitude), Number(location.longitude), Number(location.latitude))
+  }
+  params.push(VOLUNTEER_CATEGORY, limit)
+
+  const [rows] = await pool.query(sql, params)
+  return rows
+}
+
+function formatVolunteerListing(listing) {
+  if (!listing) {
+    return 'Запись недоступна'
+  }
+
+  const title = formatListingTitle(listing.title)
+  const occurred = formatDisplayDate(listing.occurred_at ?? listing.created_at)
+
+  const description = listing.description?.split('\n')?.find(Boolean) ?? ''
+  const short = description.length > 120 ? `${description.slice(0, 117)}…` : description
+
+  const parts = [`${title}`]
+
+  if (occurred) {
+    parts.push(`• Когда: ${occurred}`)
+  }
+
+  if (Number.isFinite(Number(listing.distance_km))) {
+    parts.push(`• Расстояние: ~${formatDistance(listing.distance_km)}`)
+  }
+
+  if (short) {
+    parts.push(`• Описание: ${short}`)
+  }
+
+  const lines = parts.filter(Boolean)
+
+  return lines.join('\n')
+}
+
+function buildVolunteerKeyboard(listings) {
+  const rows = listings.map(listing => [
+    button.callback(
+      `👁️ ${formatListingTitle(listing.title)}`,
+      buildFlowPayload('volunteer', 'preview', `${listing.id}`)
+    )
+  ])
+
+  rows.push([button.callback('🔄 Обновить список', buildFlowPayload(FLOWS.VOLUNTEER, 'refresh'))])
+
+  if (IS_FRONT_LINK_ALLOWED && FRONT_URL) {
+    rows.push([button.link('🗺️ Карта животных', FRONT_URL)])
+  }
+
+  if (IS_DOBRO_LINK_ALLOWED) {
+    rows.push([button.link('❤️ Помочь приютам', VK_DOBRO_URL)])
+  }
+
+  return [inlineKeyboard(rows)]
+}
+
+async function handleVolunteerListingTap(ctx, runtime, value) {
+  const listingId = value?.split?.('|')?.[0] ?? value
+
+  if (!listingId) {
+    await ctx.reply('Не удалось определить объявление. Попробуйте выбрать его ещё раз.')
+    return
+  }
+
+  const nextPayload = withVolunteerPayload(runtime, volunteer => {
+    volunteer.selectedListingId = listingId
+  })
+  await saveStateRecord(runtime.user.userId, runtime.step, nextPayload)
+
+  await handleShowListingAction(ctx, runtime.user, listingId)
+
+  const listingTitle = await fetchListingTitle(listingId)
+  const questionLines = [
+    '',
+    'Перед стартом убедитесь, что поделились номером телефона через MAX — владелец увидит его сразу после подтверждения.',
+    '',
+    `Готовы приступить к поиску по объявлению «${formatListingTitle(listingTitle)}»?`,
+    '',
+    'Если хотите вернуться к списку, нажмите «⬅️ Назад».'
+  ]
+
+  await ctx.reply(questionLines.join('\n'), {
+    attachments: buildVolunteerConfirmKeyboard(listingId)
+  })
+}
+
+async function handleVolunteerAcceptAction(ctx, runtime, value) {
+  const listingId = value?.split?.('|')?.[0] ?? value
+
+  if (!listingId) {
+    await ctx.reply('Не удалось определить объявление. Попробуйте снова.')
+    return
+  }
+
+  const listing = await fetchListingForPreview(listingId)
+  if (!listing || listing.type !== 'LOST' || listing.category !== VOLUNTEER_CATEGORY || listing.status !== 'ACTIVE') {
+    await ctx.reply('Это объявление больше недоступно или не подходит для волонтёрства.')
+    return
+  }
+
+  const volunteerContact = await fetchUserContact(runtime.user.userId)
+  if (!volunteerContact?.phone) {
+    await ctx.reply(
+      [
+        'Чтобы владелец смог связаться с вами, поделитесь номером телефона через MAX.',
+        '',
+        'Нажмите кнопку ниже или воспользуйтесь встроенной функцией «Поделиться контактом», затем снова нажмите «✅ Готов».'
+      ].join('\n'),
+      { attachments: [inlineKeyboard([[button.requestContact('📱 Поделиться контактом')]])] }
+    )
+    return
+  }
+
+  const ownerContact = await fetchUserContact(listing.author_id)
+  const listingTitle = formatListingTitle(listing.title)
+
+  await ctx.reply(
+    [
+      `✅ Отлично! Отправляю контакты владельца объявления «${listingTitle}».`,
+      '',
+      formatContactAnnouncement('владельца', ownerContact, {
+        postscript: 'Свяжитесь с владельцем и обсудите дальнейшие шаги. Спасибо за помощь!'
+      })
+    ].join('\n')
+  )
+
+  const ownerMessage = [
+    `🐾 Волонтёр готов помочь в поиске питомца по объявлению «${listingTitle}».`,
+    '',
+    formatContactAnnouncement('волонтёра', volunteerContact, {
+      postscript: 'Свяжитесь с волонтёром и договоритесь о планах поиска.'
+    })
+  ].join('\n')
+
+  await notifyUser(listing.author_id, ownerMessage)
+
+  await createNotification({
+    userId: listing.author_id,
+    type: NotificationType.VOLUNTEER_ASSIGNED,
+    listingId,
+    title: `Волонтёр откликнулся — «${listingTitle}»`,
+    body: formatContactAnnouncement('волонтёра', volunteerContact, {
+      postscript: 'Свяжитесь и договоритесь о совместных действиях.'
+    }),
+    status: NotificationStatus.UNREAD,
+    payload: {
+      listingId,
+      volunteerId: runtime.user.userId
+    }
+  })
+
+  const updatedPayload = withVolunteerPayload(runtime, volunteer => {
+    volunteer.selectedListingId = null
+  })
+  await saveStateRecord(runtime.user.userId, STEPS.VOLUNTEER_LIST, updatedPayload)
+  const updatedRuntime = { ...runtime, payload: updatedPayload }
+
+  await sendVolunteerListings(ctx, updatedRuntime, { refresh: true })
+}
+
+async function handleVolunteerBackAction(ctx, runtime) {
+  const nextPayload = withVolunteerPayload(runtime, volunteer => {
+    volunteer.selectedListingId = null
+  })
+  await saveStateRecord(runtime.user.userId, STEPS.VOLUNTEER_LIST, nextPayload)
+  const nextRuntime = { ...runtime, payload: nextPayload }
+  await sendVolunteerListings(ctx, nextRuntime, { refresh: true })
+}
+
+function buildVolunteerConfirmKeyboard(listingId) {
+  return [
+    inlineKeyboard([
+      [button.callback('✅ Готов', buildFlowPayload(FLOWS.VOLUNTEER, 'accept', listingId))],
+      [button.callback('⬅️ Назад', buildFlowPayload(FLOWS.VOLUNTEER, 'back', listingId))]
+    ])
+  ]
+}
+
+function buildVolunteerLocationKeyboard() {
+  return inlineKeyboard([[button.callback('⤴️ Без гео', buildFlowPayload(FLOWS.VOLUNTEER, 'location_skip'))]])
+}
+
+async function userHasListingAccess(userId, listingId) {
+  if (!userId || !listingId) {
+    return false
+  }
+
+  const [rows] = await pool.query(
+    `SELECT 1
+     FROM notifications
+     WHERE user_id = ?
+       AND listing_id = ?
+       AND type IN (?, ?, ?, ?, ?, ?) 
+     LIMIT 1`,
+    [
+      userId,
+      listingId,
+      NotificationType.MATCH_FOUND,
+      NotificationType.CONTACT_AVAILABLE,
+      NotificationType.OWNER_APPROVED,
+      NotificationType.OWNER_REVIEW,
+      NotificationType.OWNER_WAITING,
+      NotificationType.LISTING_PUBLISHED,
+      NotificationType.VOLUNTEER_ASSIGNED
+    ]
+  )
+
+  if (rows.length > 0) {
+    return true
+  }
+
+  const [listingRows] = await pool.query(
+    `SELECT type, category, status
+     FROM listings
+     WHERE id = ?
+     LIMIT 1`,
+    [listingId]
+  )
+
+  if (listingRows.length === 0) {
+    return false
+  }
+
+  const listing = listingRows[0]
+  if (listing.status !== 'ACTIVE') {
+    return false
+  }
+
+  if (listing.type === 'LOST' && listing.category === VOLUNTEER_CATEGORY) {
+    return true
+  }
+
+  return false
+}
+
+function listingTypeToFlow(type) {
+  if (!type) {
+    return null
+  }
+
+  const normalized = String(type).toUpperCase()
+  if (normalized === 'LOST') {
+    return FLOWS.LOST
+  }
+  if (normalized === 'FOUND') {
+    return FLOWS.FOUND
+  }
+  return null
 }
 
 function isAttributesStep(step) {
@@ -2142,6 +3530,19 @@ function formatCoordinate(value) {
   return Number(value).toFixed(5)
 }
 
+function formatDistance(value) {
+  const distance = Number(value)
+  if (!Number.isFinite(distance)) {
+    return '—'
+  }
+
+  if (distance < 1) {
+    return `${Math.round(distance * 1000)} м`
+  }
+
+  return `${distance.toFixed(distance >= 10 ? 0 : 1)} км`
+}
+
 function parseDateTimeInput(raw) {
   if (!raw) {
     return null
@@ -2367,7 +3768,7 @@ async function publishListing(runtime) {
 
   await clearStateRecord(authorId)
 
-  return { listingId, matches }
+  return { listingId, listingTitle: payload.title, listingType: payload.type, matches }
 }
 
 function buildListingPayload(flow, listing) {
@@ -2601,7 +4002,10 @@ function parseFlowPayload(rawPayload) {
 
   const [_, flow, action, value = ''] = parts
 
-  if (!FLOW_COPY[flow] && action !== 'start' && action !== 'menu' && action !== 'cancel') {
+  const isKnownFlow = Boolean(FLOW_COPY[flow])
+  const isAuxiliaryFlow = AUXILIARY_FLOWS.has(flow)
+
+  if (!isKnownFlow && !isAuxiliaryFlow && action !== 'start' && action !== 'menu' && action !== 'cancel') {
     return null
   }
 
@@ -2774,6 +4178,17 @@ function withListing(runtime, mutator) {
   }
   nextPayload.listing = nextPayload.listing ?? createEmptyListing(runtime.flow)
   mutator(nextPayload.listing, nextPayload)
+  return nextPayload
+}
+
+function withVolunteerPayload(runtime, mutator) {
+  const baseFlow = runtime.flow ?? FLOWS.VOLUNTEER
+  const nextPayload = clonePayload(runtime.payload ?? { flow: baseFlow })
+  if (!nextPayload.flow) {
+    nextPayload.flow = baseFlow
+  }
+  nextPayload.volunteer = nextPayload.volunteer ?? {}
+  mutator(nextPayload.volunteer, nextPayload)
   return nextPayload
 }
 
