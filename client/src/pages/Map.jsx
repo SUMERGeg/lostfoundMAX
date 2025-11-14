@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useNavigate, useOutletContext } from 'react-router-dom'
+import { useOutletContext } from 'react-router-dom'
 import { getCategoryMeta, TYPE_META } from '../utils/categories.js'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8080'
@@ -21,7 +21,6 @@ export default function MapPage() {
   const requestIdRef = useRef(0)
   const outletContext = useOutletContext() ?? { filters: initialFilters }
   const filters = outletContext.filters ?? initialFilters
-  const navigate = useNavigate()
   const [status, setStatus] = useState({ loading: false, error: null })
 
   useEffect(() => {
@@ -73,7 +72,7 @@ export default function MapPage() {
   function ensureMarkerLayout() {
     if (!markerLayoutRef.current && typeof ymaps !== 'undefined') {
       markerLayoutRef.current = ymaps.templateLayoutFactory.createClass(
-        '<div style="width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:600;color:#fff;background-color:$[properties.color];box-shadow:0 8px 20px rgba(15,23,42,0.25);">' +
+        '<div style="width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:600;color:#fff;background-color:$[properties.color];box-shadow:0 8px 20px rgba(15,23,42,0.25);cursor:pointer;transform:translateZ(0);">' +
           '$[properties.emoji]' +
           '</div>'
       )
@@ -129,13 +128,24 @@ export default function MapPage() {
               iconOffset: [-20, -20],
               iconShape: {
                 type: 'Circle',
-                coordinates: [0, 0],
+                coordinates: [20, 20],
                 radius: 20
-              }
+              },
+              hideIconOnBalloonOpen: false
             }
           )
 
-          placemark.events.add('click', () => navigate(`/listing/${item.id}`))
+          placemark.events.add('click', event => {
+            const domEvent = event.get('domEvent')
+            if (domEvent) {
+              domEvent.preventDefault()
+              domEvent.stopPropagation()
+            }
+            if (!placemark.balloon.isOpen()) {
+              placemark.balloon.open()
+            }
+          })
+
           return placemark
         })
 

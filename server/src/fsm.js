@@ -24,7 +24,7 @@ const { inlineKeyboard, button } = Keyboard
 
 const FRONT_URL = (process.env.FRONT_ORIGIN || 'http://localhost:5173').trim()
 const IS_FRONT_LINK_ALLOWED = FRONT_URL.startsWith('https://')
-const VK_DOBRO_URL = (process.env.VK_DOBRO_URL || '').trim()
+const VK_DOBRO_URL = (process.env.VK_DOBRO_URL || 'https://dobro.mail.ru/projects/?recipient=animals').trim()
 const IS_DOBRO_LINK_ALLOWED = VK_DOBRO_URL.startsWith('https://')
 
 export const FLOWS = {
